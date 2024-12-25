@@ -1,18 +1,15 @@
 # promster
 
-[<img src="https://img.shields.io/docker/pulls/flaviostutz/promster"/>](https://hub.docker.com/r/flaviostutz/promster)
-[<img src="https://img.shields.io/docker/automated/flaviostutz/promster"/>](https://hub.docker.com/r/flaviostutz/promster)<br/>
-[<img src="https://goreportcard.com/badge/github.com/flaviostutz/promster"/>](https://goreportcard.com/report/github.com/flaviostutz/promster)
+[<img src="https://img.shields.io/docker/pulls/lumeweb/promster"/>](https://hub.docker.com/r/lumeweb/promster)
+[<img src="https://img.shields.io/docker/automated/lumeweb/promster"/>](https://hub.docker.com/r/lumeweb/promster)<br/>
+[<img src="https://goreportcard.com/badge/github.com/lumeweb/promster"/>](https://goreportcard.com/report/github.com/lumeweb/promster)
 
-Prometheus with dynamic clustering and scrape sharding capabilities based on ETCD.
+Prometheus with dynamic scrape target discovery based on ETCD.
 
 Promster is a process that runs in parallel to Prometheus and operates by changing prometheus.yml and file with lists of hosts/federated Prometheus to be scraped dynamically.
 
 By using record rules and sharding scrape among servers, you can reduce the dimensionality of metrics, keeping then under variability control. Promster manages the list of hosts so that it can be used to configure hierarquical schemes of Prometheus chains for large scale deployments. See an example in diagrams below:
 
-![hierarchical](docs/hierarchical-prometheus.png "diagram")
-
-![hierarchical](docs/etcd-prometheus.png "diagram")
 
 Promster helps you create this kind of Prometheus deployment by helping you create those recording rules, discover scrape targets, discover sibilings, Prometheus instances and then distribute the load across those instances accordingly so that if you scale the number of Prometheus instances the (sharded) load will get distributed over the other instances automatically.
 
@@ -47,18 +44,13 @@ services:
       - 3000
 
   promster-level1:
-    image: flaviostutz/promster
+    image: lumeweb/promster
     ports:
       - 9090
     environment:
       - LOG_LEVEL=info
       - SCHEME=http
       - TLS_INSECURE=false
-
-      - REGISTRY_ETCD_URL=http://etcd0:2379
-      - REGISTRY_ETCD_BASE=/registry
-      - REGISTRY_SERVICE=prom-level1
-      - REGISTRY_TTL=5
 
       - SCRAPE_ETCD_URL=http://etcd0:2379
       - SCRAPE_ETCD_PATH=/webservers/generator
@@ -73,16 +65,11 @@ services:
       - EVALUATION_INTERVAL=20s
 
   promster-level2:
-    image: flaviostutz/promster
+    image: lumeweb/promster
     ports:
       - 9090
     environment:
       - LOG_LEVEL=info
-
-      - REGISTRY_ETCD_URL=http://etcd0:2379
-      - REGISTRY_ETCD_BASE=/registry
-      - REGISTRY_SERVICE=prom-level2
-      - REGISTRY_TTL=5
 
       - SCRAPE_ETCD_URL=http://etcd0:2379
       - SCRAPE_ETCD_PATH=/registry/prom-level1
@@ -101,16 +88,11 @@ services:
       - EVALUATION_INTERVAL=20s
 
   promster-level3:
-    image: flaviostutz/promster
+    image: lumeweb/promster
     ports:
       - 9090
     environment:
       - LOG_LEVEL=info
-
-      - REGISTRY_ETCD_URL=http://etcd0:2379
-      - REGISTRY_ETCD_BASE=/registry
-      - REGISTRY_SERVICE=prom-level3
-      - REGISTRY_TTL=5
 
       - SCRAPE_ETCD_URL=http://etcd0:2379
       - SCRAPE_ETCD_PATH=/registry/prom-level2
@@ -158,12 +140,6 @@ services:
 
 * EVALUATION_INTERVAL time between record rules and alerts evaliation
 * RETENTION_TIME time during which the data will be stored
-
-* REGISTRY_ETCD_URL etcd URLs to connect to get or register Promster nodes
-* REGISTRY_ETCD_BASE base path inside etcd for the service dir
-* REGISTRY_SERVICE name of the service used to register nodes on this level
-* REGISTRY_TTL expiration time of an entry in ETCD when registering nodes
-* if REGISTRY_* ENVs are not defined, no sharding of targets will take place so that all instances will scrape all targets
 
 * RECORD_RULE_1_NAME metric name that will receive contents for expr 1. where '1' maybe any sequential number for multiple rules creation
 * RECORD_RULE_1_EXPR expression/query that will generate contents to the metric

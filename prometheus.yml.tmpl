@@ -8,11 +8,6 @@ rule_files:
 
 scrape_configs:
   - job_name: 'prometheus'
-    metric_relabel_configs:
-    - source_labels: ["__name__"]
-      regex: "prometheus_.*"
-      target_label: "instance"
-      replacement: "{{.prometheusServer}}"
     static_configs:
     - targets: ['localhost:9090']
 
@@ -31,7 +26,7 @@ scrape_configs:
         - '{__name__=~"{{$scrapeMatch}}"}'
 {{end}}
     file_sd_configs:
-      - files: 
+      - files:
         - /servers.json
 
 {{end}}
