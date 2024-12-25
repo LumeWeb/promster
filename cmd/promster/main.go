@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
@@ -18,10 +19,15 @@ import (
 
 const PROM_TEMPLATE_FILE = "prometheus.yml.tmpl"
 
-// SourceTarget defines the structure of a prometheus source target
 type SourceTarget struct {
 	Targets []string          `json:"targets"`
 	Labels  map[string]string `json:"labels,omitempty"`
+}
+
+type RecordingRule struct {
+	name   string
+	expr   string
+	labels map[string]string
 }
 
 func executeTemplate(baseDir string, templateFile string, data interface{}) (string, error) {
@@ -37,6 +43,286 @@ func executeTemplate(baseDir string, templateFile string, data interface{}) (str
 	}
 
 	return result.String(), nil
+}
+
+func writeConfigFile(filename string, data []byte) error {
+	tempFile := filename + ".tmp"
+	if err := os.WriteFile(tempFile, data, 0666); err != nil {
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+
+	if err := os.Rename(tempFile, filename); err != nil {
+		os.Remove(tempFile) // Clean up temp file
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	return nil
+}
+
+func reloadPrometheus() error {
+	resp, err := http.Post("http://localhost:9090/-/reload", "", nil)
+	if err != nil {
+		return fmt.Errorf("failed to reload prometheus config: %w", err)
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
+func getScrapeTargets(registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []string) []SourceTarget {
+	targets := make([]SourceTarget, 0)
+	for _, path := range scrapeEtcdPaths {
+		nodes, err := registry.GetServiceNodes(path)
+		if err != nil {
+			logrus.Warnf("Failed to get service nodes for path %s: %v", path, err)
+			continue
+		}
+
+		for _, node := range nodes {
+			targets = append(targets, SourceTarget{
+				Labels:  map[string]string{"prsn": node.Name},
+				Targets: []string{node.Info["address"]},
+			})
+		}
+	}
+	return targets
+}
+
+func areScrapeTargetsEqual(a, b []SourceTarget) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for i := range a {
+		if !areSourceTargetsEqual(a[i], b[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func areSourceTargetsEqual(a, b SourceTarget) bool {
+	if len(a.Targets) != len(b.Targets) {
+		return false
+	}
+
+	for i := range a.Targets {
+		if a.Targets[i] != b.Targets[i] {
+			return false
+		}
+	}
+
+	if len(a.Labels) != len(b.Labels) {
+		return false
+	}
+
+	for k, v := range a.Labels {
+		if b.Labels[k] != v {
+			return false
+		}
+	}
+
+	return true
+}
+
+func updatePrometheusConfig(prometheusFile string, config map[string]interface{}) error {
+	contents, err := executeTemplate("/", PROM_TEMPLATE_FILE, config)
+	if err != nil {
+		return fmt.Errorf("failed to execute template: %w", err)
+	}
+
+	if err := writeConfigFile(prometheusFile, []byte(contents)); err != nil {
+		return err
+	}
+
+	return reloadPrometheus()
+}
+
+func updatePrometheusTargets(scrapeTargets []SourceTarget) error {
+	contents, err := json.Marshal(scrapeTargets)
+	if err != nil {
+		return fmt.Errorf("failed to marshal targets: %w", err)
+	}
+
+	if err := writeConfigFile("/servers.json", contents); err != nil {
+		return err
+	}
+
+	return reloadPrometheus()
+}
+
+func getLabelMap(rawLabels string) map[string]string {
+	toReturn := make(map[string]string)
+	mappings := strings.Split(rawLabels, ",")
+	for _, mapping := range mappings {
+		if mapping != "" {
+			var keyValue = strings.Split(mapping, ":")
+			toReturn[keyValue[0]] = keyValue[1]
+		}
+	}
+
+	return toReturn
+}
+
+func getPrintableLabels(labels map[string]string) string {
+	if len(labels) <= 0 {
+		return ""
+	}
+
+	var toReturn = `
+      labels:`
+	for k, v := range labels {
+		var format = `
+        %s: %s`
+		toReturn += fmt.Sprintf(format, k, v)
+	}
+	return toReturn
+}
+
+func createRulesFromENV(rulesFile string) error {
+	env := make(map[string]string)
+	for _, e := range os.Environ() {
+		pair := strings.Split(e, "=")
+		env[pair[0]] = pair[1]
+	}
+	rules := make([]RecordingRule, 0)
+	for i := 1; i < 100; i++ {
+		kname := fmt.Sprintf("RECORD_RULE_%d_NAME", i)
+		kexpr := fmt.Sprintf("RECORD_RULE_%d_EXPR", i)
+		klabels := fmt.Sprintf("RECORD_RULE_%d_LABELS", i)
+
+		vname, exists := env[kname]
+		if !exists {
+			break
+		}
+		vexpr, exists := env[kexpr]
+		if !exists {
+			break
+		}
+
+		rules = append(rules, RecordingRule{name: vname, expr: vexpr, labels: getLabelMap(env[klabels])})
+	}
+
+	if len(rules) == 0 {
+		logrus.Infof("No prometheus rules found in environment variables")
+		return nil
+	}
+
+	rulesContents := `groups:
+  - name: env-rules
+    rules:`
+
+	for _, v := range rules {
+		rc := `%s
+    - record: %s
+      expr: %s
+%s
+`
+		rulesContents = fmt.Sprintf(rc, rulesContents, v.name, v.expr, getPrintableLabels(v.labels))
+	}
+
+	if err := writeConfigFile(rulesFile, []byte(rulesContents)); err != nil {
+		return err
+	}
+
+	return reloadPrometheus()
+}
+
+func monitorTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []string) error {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	var (
+		previousTargets []SourceTarget
+		targetsMu       sync.RWMutex
+	)
+
+	for {
+		select {
+		case <-ticker.C:
+			targets := getScrapeTargets(registry, scrapeEtcdPaths)
+
+			targetsMu.Lock()
+			if !areScrapeTargetsEqual(targets, previousTargets) {
+				if err := updatePrometheusTargets(targets); err != nil {
+					logrus.WithError(err).Error("Failed to update prometheus targets")
+				} else {
+					previousTargets = targets
+				}
+			}
+			targetsMu.Unlock()
+
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func run(ctx context.Context, cmd *cli.Command) error {
+	// Set log level
+	switch cmd.String("loglevel") {
+	case "debug":
+		logrus.SetLevel(logrus.DebugLevel)
+	case "warning":
+		logrus.SetLevel(logrus.WarnLevel)
+	case "error":
+		logrus.SetLevel(logrus.ErrorLevel)
+	default:
+		logrus.SetLevel(logrus.InfoLevel)
+	}
+
+	// Get flag values
+	etcdURLScrape := cmd.String("scrape-etcd-url")
+	etcdBasePath := cmd.String("etcd-base-path")
+	scrapeEtcdPaths := strings.Split(cmd.String("scrape-etcd-paths"), ",")
+	scrapeInterval := cmd.String("scrape-interval")
+	scrapeTimeout := cmd.String("scrape-timeout")
+	scrapeMatch := cmd.String("scrape-match")
+	evaluationInterval := cmd.String("evaluation-interval")
+	scrapePaths := strings.Split(cmd.String("scrape-paths"), ",")
+	scheme := cmd.String("scheme")
+	tlsInsecure := cmd.String("tls-insecure")
+	etcdUsername := cmd.String("etcd-username")
+	etcdPassword := cmd.String("etcd-password")
+	etcdTimeout := cmd.Duration("etcd-timeout")
+
+	logrus.Info("====Starting Promster====")
+	time.Sleep(5 * time.Second)
+
+	registry, err := etcdregistry.NewEtcdRegistry(
+		strings.Split(etcdURLScrape, ","),
+		etcdBasePath,
+		etcdUsername,
+		etcdPassword,
+		etcdTimeout,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create etcd registry: %w", err)
+	}
+
+	// Create initial prometheus config
+	config := map[string]interface{}{
+		"scrapeInterval":     scrapeInterval,
+		"scrapeTimeout":      scrapeTimeout,
+		"evaluationInterval": evaluationInterval,
+		"scrapePaths":        scrapePaths,
+		"scrapeMatch":        scrapeMatch,
+		"scheme":             scheme,
+		"tlsInsecure":        tlsInsecure,
+	}
+
+	if err := updatePrometheusConfig("/prometheus.yml", config); err != nil {
+		return fmt.Errorf("failed to update initial prometheus config: %w", err)
+	}
+
+	if err := createRulesFromENV("/rules.yml"); err != nil {
+		return fmt.Errorf("failed to create rules: %w", err)
+	}
+
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
+	defer cancel()
+
+	return monitorTargets(ctx, registry, scrapeEtcdPaths)
 }
 
 func main() {
@@ -57,16 +343,16 @@ func main() {
 				Sources:  cli.EnvVars("PROMSTER_SCRAPE_ETCD_URL"),
 			},
 			&cli.StringFlag{
-				Name:     "scrape-etcd-path",
-				Usage:    "Base ETCD path for getting servers to be scrapped",
+				Name:     "etcd-base-path",
+				Usage:    "Base ETCD path for the registry",
 				Required: true,
-				Sources:  cli.EnvVars("PROMSTER_SCRAPE_ETCD_PATH"),
+				Sources:  cli.EnvVars("PROMSTER_ETCD_BASE_PATH"),
 			},
 			&cli.StringFlag{
-				Name:    "register-etcd-path",
-				Usage:   "Base ETCD path for registering this service",
-				Value:   "/promster",
-				Sources: cli.EnvVars("PROMSTER_REGISTER_ETCD_PATH"),
+				Name:     "scrape-etcd-paths",
+				Usage:    "Comma-separated list of base ETCD paths for getting servers to be scrapped",
+				Required: true,
+				Sources:  cli.EnvVars("PROMSTER_SCRAPE_ETCD_PATHS"),
 			},
 			&cli.StringFlag{
 				Name:    "scrape-paths",
@@ -125,12 +411,6 @@ func main() {
 				Usage:   "ETCD timeout",
 				Sources: cli.EnvVars("PROMSTER_ETCD_TIMEOUT"),
 			},
-			&cli.DurationFlag{
-				Name:    "register-ttl",
-				Value:   60 * time.Second,
-				Usage:   "ETCD TTL for service registration",
-				Sources: cli.EnvVars("PROMSTER_REGISTER_TTL"),
-			},
 		},
 		Action: run,
 	}
@@ -138,254 +418,4 @@ func main() {
 	if err := cmd.Run(context.Background(), os.Args); err != nil {
 		logrus.Fatal(err)
 	}
-}
-
-func run(ctx context.Context, cmd *cli.Command) error {
-	// Set log level
-	switch cmd.String("loglevel") {
-	case "debug":
-		logrus.SetLevel(logrus.DebugLevel)
-	case "warning":
-		logrus.SetLevel(logrus.WarnLevel)
-	case "error":
-		logrus.SetLevel(logrus.ErrorLevel)
-	default:
-		logrus.SetLevel(logrus.InfoLevel)
-	}
-
-	// Get flag values
-	etcdURLScrape := cmd.String("scrape-etcd-url")
-	scrapeEtcdPath := cmd.String("scrape-etcd-path")
-	registerEtcdPath := cmd.String("register-etcd-path")
-	scrapeInterval := cmd.String("scrape-interval")
-	scrapeTimeout := cmd.String("scrape-timeout")
-	scrapeMatch := cmd.String("scrape-match")
-	evaluationInterval := cmd.String("evaluation-interval")
-	scrapePaths := strings.Split(cmd.String("scrape-paths"), ",")
-	scheme := cmd.String("scheme")
-	tlsInsecure := cmd.String("tls-insecure")
-	etcdUsername := cmd.String("etcd-username")
-	etcdPassword := cmd.String("etcd-password")
-	etcdTimeout := cmd.Duration("etcd-timeout")
-
-	logrus.Infof("====Starting Promster====")
-	logrus.Debugf("Updating prometheus file...")
-	time.Sleep(5 * time.Second)
-
-	if err := updatePrometheusConfig("/prometheus.yml", scrapeInterval, scrapeTimeout, evaluationInterval, scrapePaths, scrapeMatch, scheme, tlsInsecure); err != nil {
-		return fmt.Errorf("failed to update prometheus config: %w", err)
-	}
-
-	if err := createRulesFromENV("/rules.yml"); err != nil {
-		return fmt.Errorf("failed to create rules: %w", err)
-	}
-
-	endpointsScrape := strings.Split(etcdURLScrape, ",")
-
-	registry, err := etcdregistry.NewEtcdRegistry(endpointsScrape, scrapeEtcdPath, etcdUsername, etcdPassword, etcdTimeout)
-	if err != nil {
-		return fmt.Errorf("failed to create etcd registry: %w", err)
-	}
-
-	// Create a context that is cancelled when the program is interrupted
-	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
-	defer cancel()
-
-	scrapeTargets := make([]SourceTarget, 0)
-	go func() {
-		for {
-			nodes, err := registry.GetServiceNodes(registerEtcdPath)
-			if err != nil {
-				logrus.Warnf("Failed to get service nodes: %v", err)
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			scrapeTargets = make([]SourceTarget, 0)
-			for _, node := range nodes {
-				scrapeTargets = append(scrapeTargets, SourceTarget{
-					Labels:  map[string]string{"prsn": node.Name},
-					Targets: []string{node.Info["address"]},
-				})
-			}
-
-			if err := updatePrometheusTargets(scrapeTargets); err != nil {
-				logrus.Warnf("Couldn't update Prometheus scrape targets: %v", err)
-			}
-			logrus.Debugf("Scrape targets found: %s", scrapeTargets)
-			time.Sleep(5 * time.Second)
-		}
-	}()
-
-	<-ctx.Done()
-
-	return nil
-}
-
-func updatePrometheusConfig(prometheusFile string, scrapeInterval string, scrapeTimeout string, evaluationInterval string, scrapePaths []string, scrapeMatch string, scheme string, tlsInsecure string) error {
-	logrus.Infof("updatePrometheusConfig. scrapeInterval=%s,scrapeTimeout=%s,evaluationInterval=%s,scrapePaths=%s,scrapeMatch=%s,scheme=%s,tlsInsecure=%s", scrapeInterval, scrapeTimeout, evaluationInterval, scrapePaths, scrapeMatch, scheme, tlsInsecure)
-	input := make(map[string]interface{})
-	input["scrapeInterval"] = scrapeInterval
-	input["scrapeTimeout"] = scrapeTimeout
-	input["evaluationInterval"] = evaluationInterval
-	input["scrapePaths"] = scrapePaths
-	input["scrapeMatch"] = scrapeMatch
-	input["scheme"] = scheme
-	input["tlsInsecure"] = tlsInsecure
-	contents, err := executeTemplate("/", PROM_TEMPLATE_FILE, input)
-	if err != nil {
-		return err
-	}
-
-	logrus.Debugf("%s: '%s'", prometheusFile, contents)
-	err = os.WriteFile(prometheusFile, []byte(contents), 0666)
-	if err != nil {
-		return err
-	}
-
-	resp, err := http.Post("http://localhost:9090/-/reload", "", nil)
-	if err != nil {
-		logrus.Warnf("Couldn't reload Prometheus config. Maybe it wasn't initialized at this time and will get the config as soon as getting started. Ignoring.")
-	}
-	if resp != nil {
-		err = resp.Body.Close()
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// RecordingRule defines a structure to simplify the handling of Prometheus recording rules
-type RecordingRule struct {
-	name   string
-	expr   string
-	labels map[string]string
-}
-
-// getLabelMap builds a label map from a raw configuration string
-func getLabelMap(rawLabels string) map[string]string {
-	toReturn := make(map[string]string)
-	mappings := strings.Split(rawLabels, ",")
-	for _, mapping := range mappings {
-		if mapping != "" {
-			var keyValue = strings.Split(mapping, ":")
-			toReturn[keyValue[0]] = keyValue[1]
-		}
-	}
-
-	return toReturn
-}
-
-// getPrintableLabels builds the labels in a printable format
-func getPrintableLabels(labels map[string]string) string {
-	if len(labels) <= 0 {
-		return ""
-	}
-
-	var toReturn = `
-      labels:`
-	for k, v := range labels {
-		var format = `
-        %s: %s`
-		toReturn += fmt.Sprintf(format, k, v)
-	}
-	return toReturn
-}
-
-func createRulesFromENV(rulesFile string) error {
-	env := make(map[string]string)
-	for _, e := range os.Environ() {
-		pair := strings.Split(e, "=")
-		env[pair[0]] = pair[1]
-	}
-	rules := make([]RecordingRule, 0)
-	for i := 1; i < 100; i++ {
-		kname := fmt.Sprintf("RECORD_RULE_%d_NAME", i)
-		kexpr := fmt.Sprintf("RECORD_RULE_%d_EXPR", i)
-		klabels := fmt.Sprintf("RECORD_RULE_%d_LABELS", i)
-
-		vname, exists := env[kname]
-		if !exists {
-			break
-		}
-		vexpr, exists := env[kexpr]
-		if !exists {
-			break
-		}
-
-		rules = append(rules, RecordingRule{name: vname, expr: vexpr, labels: getLabelMap(env[klabels])})
-	}
-
-	if len(rules) == 0 {
-		logrus.Infof("No prometheus rules found in environment variables")
-		return nil
-	}
-
-	logrus.Debugf("Found %d rules: %s", len(rules), rules)
-
-	rulesContents := `groups:
-  - name: env-rules
-    rules:`
-
-	for _, v := range rules {
-		rc := `%s
-    - record: %s
-      expr: %s
-%s
-`
-		rulesContents = fmt.Sprintf(rc, rulesContents, v.name, v.expr, getPrintableLabels(v.labels))
-	}
-
-	logrus.Debugf("%s: '%v'", rulesFile, rulesContents)
-
-	err := os.WriteFile(rulesFile, []byte(rulesContents), 0666)
-	if err != nil {
-		return err
-	}
-
-	resp, err := http.Post("http://localhost:9090/-/reload", "", nil)
-	if err != nil {
-		logrus.Warnf("Couldn't reload Prometheus config. Maybe it wasn't initialized at this time and will get the config as soon as getting started. Ignoring.")
-	}
-	if resp != nil {
-		err = resp.Body.Close()
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func updatePrometheusTargets(scrapeTargets []SourceTarget) error {
-	logrus.Debugf("updatePrometheusTargets. scrapeTargets=%s", scrapeTargets)
-
-	// Since we're not scaling, we'll use all targets
-	selfScrapeTargets := scrapeTargets
-
-	//generate json file
-	contents, err := json.Marshal(selfScrapeTargets)
-	if err != nil {
-		return err
-	}
-	logrus.Debugf("Writing /servers.json: '%s'", string(contents))
-	err = os.WriteFile("/servers.json", contents, 0666)
-	if err != nil {
-		return err
-	}
-
-	//force Prometheus to update its configuration live
-	resp, err := http.Post("http://localhost:9090/-/reload", "", nil)
-	if err != nil {
-		return err
-	}
-	if resp != nil {
-		err = resp.Body.Close()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
