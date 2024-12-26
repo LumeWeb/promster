@@ -15,9 +15,15 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v3"
 	etcdregistry "go.lumeweb.com/etcd-registry"
+	_ "embed"
 )
 
-const PROM_TEMPLATE_FILE = "prometheus.yml.tmpl"
+//go:embed prometheus.yml.tmpl
+var prometheusTemplate string
+
+const (
+	PROM_TEMPLATE_FILE = "prometheus.yml.tmpl"
+)
 
 type BasicAuth struct {
 	Password string `json:"password,omitempty"`
@@ -35,8 +41,8 @@ type RecordingRule struct {
 	labels map[string]string
 }
 
-func executeTemplate(baseDir string, templateFile string, data interface{}) (string, error) {
-	tmpl, err := template.ParseFiles(baseDir + templateFile)
+func executeTemplate(data interface{}) (string, error) {
+	tmpl, err := template.New(PROM_TEMPLATE_FILE).Parse(prometheusTemplate)
 	if err != nil {
 		return "", err
 	}
@@ -148,7 +154,7 @@ func areSourceTargetsEqual(a, b SourceTarget) bool {
 }
 
 func updatePrometheusConfig(prometheusFile string, config map[string]interface{}) error {
-	contents, err := executeTemplate("/", PROM_TEMPLATE_FILE, config)
+	contents, err := executeTemplate(config)
 	if err != nil {
 		return fmt.Errorf("failed to execute template: %w", err)
 	}
