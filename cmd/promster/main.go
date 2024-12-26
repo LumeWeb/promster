@@ -356,7 +356,7 @@ func main() {
 			},
 			&cli.StringFlag{
 				Name:     "scrape-etcd-url",
-				Usage:    "ETCD URLs for scrape source server. If empty, will be the same as --etcd-url. ex: http://etcd0:2379",
+				Usage:    "ETCD URLs for scrape source server",
 				Required: true,
 				Sources:  cli.EnvVars("PROMSTER_SCRAPE_ETCD_URL"),
 			},
