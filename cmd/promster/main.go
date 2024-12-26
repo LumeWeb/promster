@@ -71,12 +71,23 @@ func writeConfigFile(filename string, data []byte) error {
 }
 
 func reloadPrometheus() error {
-	resp, err := http.Post("http://localhost:9090/-/reload", "", nil)
-	if err != nil {
-		return fmt.Errorf("failed to reload prometheus config: %w", err)
+	adminUsername := os.Getenv("PROMETHEUS_ADMIN_USERNAME")
+	adminPassword := os.Getenv("PROMETHEUS_ADMIN_PASSWORD")
+	if adminUsername != "" && adminPassword != "" {
+		req, err := http.NewRequest("POST", "http://localhost:9090/-/reload", nil)
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+		req.SetBasicAuth(adminUsername, adminPassword)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to reload prometheus config: %w", err)
+		}
+		defer resp.Body.Close()
+		return nil
+	} else {
+		return fmt.Errorf("PROMETHEUS_ADMIN_USERNAME and PROMETHEUS_ADMIN_PASSWORD must be set")
 	}
-	defer resp.Body.Close()
-	return nil
 }
 
 func getScrapeTargets(registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []string) []SourceTarget {
