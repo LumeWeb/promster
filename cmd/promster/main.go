@@ -19,9 +19,14 @@ import (
 
 const PROM_TEMPLATE_FILE = "prometheus.yml.tmpl"
 
+type BasicAuth struct {
+	Password string `json:"password,omitempty"`
+}
+
 type SourceTarget struct {
-	Targets []string          `json:"targets"`
-	Labels  map[string]string `json:"labels,omitempty"`
+	Targets   []string          `json:"targets"`
+	Labels    map[string]string `json:"labels,omitempty"`
+	BasicAuth *BasicAuth        `json:"basic_auth,omitempty"`
 }
 
 type RecordingRule struct {
@@ -78,10 +83,19 @@ func getScrapeTargets(registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []str
 		}
 
 		for _, node := range nodes {
-			targets = append(targets, SourceTarget{
+			target := SourceTarget{
 				Labels:  map[string]string{"prsn": node.Name},
 				Targets: []string{node.Info["address"]},
-			})
+			}
+
+			// If password is present in node info, add basic auth
+			if password, ok := node.Info["password"]; ok {
+				target.BasicAuth = &BasicAuth{
+					Password: password,
+				}
+			}
+
+			targets = append(targets, target)
 		}
 	}
 	return targets
@@ -118,6 +132,16 @@ func areSourceTargetsEqual(a, b SourceTarget) bool {
 
 	for k, v := range a.Labels {
 		if b.Labels[k] != v {
+			return false
+		}
+	}
+
+	// Compare auth settings
+	if (a.BasicAuth == nil) != (b.BasicAuth == nil) {
+		return false
+	}
+	if a.BasicAuth != nil && b.BasicAuth != nil {
+		if a.BasicAuth.Password != b.BasicAuth.Password {
 			return false
 		}
 	}
