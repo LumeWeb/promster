@@ -299,7 +299,6 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	scrapeEtcdPaths := strings.Split(cmd.String("scrape-etcd-paths"), ",")
 	scrapeInterval := cmd.String("scrape-interval")
 	scrapeTimeout := cmd.String("scrape-timeout")
-	scrapeMatch := cmd.String("scrape-match")
 	evaluationInterval := cmd.String("evaluation-interval")
 	scheme := cmd.String("scheme")
 	tlsInsecure := cmd.String("tls-insecure")
@@ -326,7 +325,6 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		"scrapeInterval":     scrapeInterval,
 		"scrapeTimeout":      scrapeTimeout,
 		"evaluationInterval": evaluationInterval,
-		"scrapeMatch":        scrapeMatch,
 		"scheme":             scheme,
 		"tlsInsecure":        tlsInsecure,
 	}
@@ -385,11 +383,6 @@ func main() {
 				Value:   "30s",
 				Usage:   "Prometheus scrape timeout",
 				Sources: cli.EnvVars("PROMSTER_SCRAPE_TIMEOUT"),
-			},
-			&cli.StringFlag{
-				Name:    "scrape-match",
-				Usage:   "Metrics regex filter applied on scraped targets. Commonly used in conjunction with /federate metrics endpoint",
-				Sources: cli.EnvVars("PROMSTER_SCRAPE_MATCH"),
 			},
 			&cli.StringFlag{
 				Name:    "evaluation-interval",

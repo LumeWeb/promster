@@ -15,10 +15,6 @@ scrape_configs:
     scheme: {{.scheme}}
     tls_config:
       insecure_skip_verify: {{.tlsInsecure}}
-{{if not (eq .scrapeMatch "")}}
-    params:
-      'match[]':
-        - '{__name__=~"{{.scrapeMatch}}"}'
 {{end}}
     file_sd_configs:
       - files:
