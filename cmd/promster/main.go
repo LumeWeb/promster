@@ -88,7 +88,6 @@ func getScrapeTargets(registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []str
 				Targets: []string{node.Info["address"]},
 			}
 
-			// If password is present in node info, add basic auth
 			if password, ok := node.Info["password"]; ok {
 				target.BasicAuth = &BasicAuth{
 					Password: password,
@@ -136,7 +135,6 @@ func areSourceTargetsEqual(a, b SourceTarget) bool {
 		}
 	}
 
-	// Compare auth settings
 	if (a.BasicAuth == nil) != (b.BasicAuth == nil) {
 		return false
 	}
@@ -303,7 +301,6 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	scrapeTimeout := cmd.String("scrape-timeout")
 	scrapeMatch := cmd.String("scrape-match")
 	evaluationInterval := cmd.String("evaluation-interval")
-	scrapePaths := strings.Split(cmd.String("scrape-paths"), ",")
 	scheme := cmd.String("scheme")
 	tlsInsecure := cmd.String("tls-insecure")
 	etcdUsername := cmd.String("etcd-username")
@@ -324,12 +321,11 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("failed to create etcd registry: %w", err)
 	}
 
-	// Create initial prometheus config
+	// Create initial prometheus config without scrape paths
 	config := map[string]interface{}{
 		"scrapeInterval":     scrapeInterval,
 		"scrapeTimeout":      scrapeTimeout,
 		"evaluationInterval": evaluationInterval,
-		"scrapePaths":        scrapePaths,
 		"scrapeMatch":        scrapeMatch,
 		"scheme":             scheme,
 		"tlsInsecure":        tlsInsecure,
@@ -377,12 +373,6 @@ func main() {
 				Usage:    "Comma-separated list of base ETCD paths for getting servers to be scrapped",
 				Required: true,
 				Sources:  cli.EnvVars("PROMSTER_SCRAPE_ETCD_PATHS"),
-			},
-			&cli.StringFlag{
-				Name:    "scrape-paths",
-				Value:   "/metrics",
-				Usage:   "URI for scrape of each target. May contain a list separated by ','.",
-				Sources: cli.EnvVars("PROMSTER_SCRAPE_PATHS"),
 			},
 			&cli.StringFlag{
 				Name:    "scrape-interval",
