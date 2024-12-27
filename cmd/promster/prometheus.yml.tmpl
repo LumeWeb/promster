@@ -1,7 +1,7 @@
 global:
-  scrape_interval: {{.scrapeInterval}}
-  scrape_timeout: {{.scrapeTimeout}}
-  evaluation_interval: {{.evaluationInterval}}
+  scrape_interval: {{.ScrapeInterval}}
+  scrape_timeout: {{.ScrapeTimeout}}
+  evaluation_interval: {{.EvaluationInterval}}
 
 rule_files:
   - /rules.yml
@@ -10,17 +10,23 @@ scrape_configs:
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
-    {{ if .adminPassword }}
+    {{ if .AdminPassword }}
     basic_auth:
-      username: {{.adminUsername}}
-      password: {{.adminPassword}}
+      username: {{.AdminUsername}}
+      password: {{.AdminPassword}}
     {{ end }}
 
-  - job_name: 'etcd'
-    scheme: {{.scheme}}
+  {{ range .ServiceGroups }}
+  - job_name: '{{ .Name }}'
+    scheme: {{$.Scheme}}
     tls_config:
-      insecure_skip_verify: {{.tlsInsecure}}
-    file_sd_configs:
-      - files:
-        - /servers.json
+      insecure_skip_verify: {{$.TlsInsecure}}
+    static_configs:
+      - targets: {{ .Targets }}
+    {{ if .BasicAuth }}
+    basic_auth:
+      username: {{ .BasicAuth.Username }}
+      password: {{ .BasicAuth.Password }}
+    {{ end }}
     metrics_path: /metrics
+  {{ end }}

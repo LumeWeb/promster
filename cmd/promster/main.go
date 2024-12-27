@@ -2,20 +2,20 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"reflect"
 	"strings"
 	"sync"
 	"text/template"
 	"time"
 
+	_ "embed"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v3"
 	etcdregistry "go.lumeweb.com/etcd-registry"
-	_ "embed"
 )
 
 //go:embed prometheus.yml.tmpl
@@ -27,22 +27,55 @@ const (
 )
 
 type BasicAuth struct {
+	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
 }
 
-type SourceTarget struct {
-	Targets   []string          `json:"targets"`
-	Labels    map[string]string `json:"labels,omitempty"`
-	BasicAuth *BasicAuth        `json:"basic_auth,omitempty"`
+type ServiceGroup struct {
+	Name      string     `json:"name"`
+	Targets   []string   `json:"targets"`
+	BasicAuth *BasicAuth `json:"basic_auth,omitempty"`
 }
 
-type RecordingRule struct {
-	name   string
-	expr   string
-	labels map[string]string
+type PrometheusConfig struct {
+	ServiceGroups      []ServiceGroup `json:"service_groups"`
+	ScrapeInterval     string         `json:"scrape_interval"`
+	ScrapeTimeout      string         `json:"scrape_timeout"`
+	EvaluationInterval string         `json:"evaluation_interval"`
+	Scheme             string         `json:"scheme"`
+	TlsInsecure        string         `json:"tls_insecure"`
+	AdminUsername      string         `json:"admin_username,omitempty"`
+	AdminPassword      string         `json:"admin_password,omitempty"`
+}
+
+func (sg *ServiceGroup) Validate() error {
+	if sg.Name == "" {
+		return fmt.Errorf("service group name cannot be empty")
+	}
+	if len(sg.Targets) == 0 {
+		return fmt.Errorf("service group %s must have at least one target", sg.Name)
+	}
+	if sg.BasicAuth != nil {
+		if sg.BasicAuth.Username == "" {
+			return fmt.Errorf("service group %s basic auth username cannot be empty", sg.Name)
+		}
+		if sg.BasicAuth.Password == "" {
+			return fmt.Errorf("service group %s basic auth password cannot be empty", sg.Name)
+		}
+	}
+	return nil
 }
 
 func executeTemplate(data interface{}) (string, error) {
+	// Validate service groups before template execution
+	config, ok := data.(PrometheusConfig)
+	if ok {
+		for _, sg := range config.ServiceGroups {
+			if err := sg.Validate(); err != nil {
+				return "", fmt.Errorf("invalid service group configuration: %w", err)
+			}
+		}
+	}
 	tmpl, err := template.New(PROM_TEMPLATE_FILE).Parse(prometheusTemplate)
 	if err != nil {
 		return "", err
@@ -91,8 +124,10 @@ func reloadPrometheus() error {
 	}
 }
 
-func getScrapeTargets(registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []string) []SourceTarget {
-	targets := make([]SourceTarget, 0)
+func getScrapeTargets(registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []string) []ServiceGroup {
+	// Map to group targets by service name and auth
+	groupMap := make(map[string]*ServiceGroup)
+
 	for _, path := range scrapeEtcdPaths {
 		nodes, err := registry.GetServiceNodes(path)
 		if err != nil {
@@ -101,78 +136,72 @@ func getScrapeTargets(registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []str
 		}
 
 		for _, node := range nodes {
-			target := SourceTarget{
-				Labels:  map[string]string{"prsn": node.Name},
-				Targets: []string{node.Info["address"]},
-			}
+			serviceName := node.Name
+			address := node.Info["address"]
 
+			// Create auth key for grouping
+			authKey := ""
 			if password, ok := node.Info["password"]; ok {
-				target.BasicAuth = &BasicAuth{
-					Password: password,
+				username := node.Info["username"]
+				if username == "" {
+					username = "prometheus" // default username
 				}
+				authKey = username + ":" + password
 			}
 
-			targets = append(targets, target)
+			// Create group key
+			groupKey := serviceName + "|" + authKey
+
+			group, exists := groupMap[groupKey]
+			if !exists {
+				group = &ServiceGroup{
+					Name:    serviceName,
+					Targets: make([]string, 0),
+				}
+
+				// Only set auth if credentials exist
+				if authKey != "" {
+					username := node.Info["username"]
+					if username == "" {
+						username = "prometheus"
+					}
+					group.BasicAuth = &BasicAuth{
+						Username: username,
+						Password: node.Info["password"],
+					}
+				}
+
+				groupMap[groupKey] = group
+			}
+
+			group.Targets = append(group.Targets, address)
 		}
 	}
-	return targets
+
+	// Convert map to slice
+	groups := make([]ServiceGroup, 0, len(groupMap))
+	for _, group := range groupMap {
+		groups = append(groups, *group)
+	}
+
+	return groups
 }
 
-func areScrapeTargetsEqual(a, b []SourceTarget) bool {
-	if len(a) != len(b) {
-		return false
+func createPrometheusConfig(serviceGroups []ServiceGroup) PrometheusConfig {
+	return PrometheusConfig{
+		ServiceGroups:      serviceGroups,
+		ScrapeInterval:     scrapeInterval,
+		ScrapeTimeout:      scrapeTimeout,
+		EvaluationInterval: evaluationInterval,
+		Scheme:             scheme,
+		TlsInsecure:        tlsInsecure,
+		AdminUsername:      os.Getenv("PROMETHEUS_ADMIN_USERNAME"),
+		AdminPassword:      os.Getenv("PROMETHEUS_ADMIN_PASSWORD"),
 	}
-
-	for i := range a {
-		if !areSourceTargetsEqual(a[i], b[i]) {
-			return false
-		}
-	}
-
-	return true
 }
 
-func areSourceTargetsEqual(a, b SourceTarget) bool {
-	if len(a.Targets) != len(b.Targets) {
-		return false
-	}
-
-	for i := range a.Targets {
-		if a.Targets[i] != b.Targets[i] {
-			return false
-		}
-	}
-
-	if len(a.Labels) != len(b.Labels) {
-		return false
-	}
-
-	for k, v := range a.Labels {
-		if b.Labels[k] != v {
-			return false
-		}
-	}
-
-	if (a.BasicAuth == nil) != (b.BasicAuth == nil) {
-		return false
-	}
-	if a.BasicAuth != nil && b.BasicAuth != nil {
-		if a.BasicAuth.Password != b.BasicAuth.Password {
-			return false
-		}
-	}
-
-	return true
-}
-
-func updatePrometheusConfig(configFile string, config map[string]interface{}) error {
-	adminUsername := os.Getenv("PROMETHEUS_ADMIN_USERNAME")
-	adminPassword := os.Getenv("PROMETHEUS_ADMIN_PASSWORD")
-	config["adminUsername"] = adminUsername
-	if adminPassword != "" {
-		config["adminPassword"] = adminPassword
-	}
-
+func updatePrometheusConfig(configFile string, serviceGroups []ServiceGroup) error {
+	config := createPrometheusConfig(serviceGroups)
 	contents, err := executeTemplate(config)
 	if err != nil {
 		return fmt.Errorf("failed to execute template: %w", err)
@@ -185,116 +214,41 @@ func updatePrometheusConfig(configFile string, config map[string]interface{}) er
 	return reloadPrometheus()
 }
 
-func updatePrometheusTargets(scrapeTargets []SourceTarget) error {
-	contents, err := json.Marshal(scrapeTargets)
-	if err != nil {
-		return fmt.Errorf("failed to marshal targets: %w", err)
-	}
-
-	if err := writeConfigFile("/servers.json", contents); err != nil {
-		return err
-	}
-
-	return reloadPrometheus()
-}
-
-func getLabelMap(rawLabels string) map[string]string {
-	toReturn := make(map[string]string)
-	mappings := strings.Split(rawLabels, ",")
-	for _, mapping := range mappings {
-		if mapping != "" {
-			var keyValue = strings.Split(mapping, ":")
-			toReturn[keyValue[0]] = keyValue[1]
-		}
-	}
-
-	return toReturn
-}
-
-func getPrintableLabels(labels map[string]string) string {
-	if len(labels) <= 0 {
-		return ""
-	}
-
-	var toReturn = `
-      labels:`
-	for k, v := range labels {
-		var format = `
-        %s: %s`
-		toReturn += fmt.Sprintf(format, k, v)
-	}
-	return toReturn
-}
-
-func createRulesFromENV(rulesFile string) error {
-	env := make(map[string]string)
-	for _, e := range os.Environ() {
-		pair := strings.Split(e, "=")
-		env[pair[0]] = pair[1]
-	}
-	rules := make([]RecordingRule, 0)
-	for i := 1; i < 100; i++ {
-		kname := fmt.Sprintf("RECORD_RULE_%d_NAME", i)
-		kexpr := fmt.Sprintf("RECORD_RULE_%d_EXPR", i)
-		klabels := fmt.Sprintf("RECORD_RULE_%d_LABELS", i)
-
-		vname, exists := env[kname]
-		if !exists {
-			break
-		}
-		vexpr, exists := env[kexpr]
-		if !exists {
-			break
-		}
-
-		rules = append(rules, RecordingRule{name: vname, expr: vexpr, labels: getLabelMap(env[klabels])})
-	}
-
-	if len(rules) == 0 {
-		logrus.Infof("No prometheus rules found in environment variables")
-		return nil
-	}
-
-	rulesContents := `groups:
-  - name: env-rules
-    rules:`
-
-	for _, v := range rules {
-		rc := `%s
-    - record: %s
-      expr: %s
-%s
-`
-		rulesContents = fmt.Sprintf(rc, rulesContents, v.name, v.expr, getPrintableLabels(v.labels))
-	}
-
-	if err := writeConfigFile(rulesFile, []byte(rulesContents)); err != nil {
-		return err
-	}
-
-	return reloadPrometheus()
-}
+var (
+	scrapeInterval     string
+	scrapeTimeout      string
+	evaluationInterval string
+	scheme             string
+	tlsInsecure        string
+	configFile         string
+)
 
 func monitorTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []string) error {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	var (
-		previousTargets []SourceTarget
-		targetsMu       sync.RWMutex
+		previousGroups []ServiceGroup
+		targetsMu      sync.RWMutex
 	)
 
 	for {
 		select {
 		case <-ticker.C:
-			targets := getScrapeTargets(registry, scrapeEtcdPaths)
+			serviceGroups := getScrapeTargets(registry, scrapeEtcdPaths)
 
 			targetsMu.Lock()
-			if !areScrapeTargetsEqual(targets, previousTargets) {
-				if err := updatePrometheusTargets(targets); err != nil {
-					logrus.WithError(err).Error("Failed to update prometheus targets")
+			if !reflect.DeepEqual(serviceGroups, previousGroups) {
+				logrus.WithFields(logrus.Fields{
+					"num_groups": len(serviceGroups),
+					"groups":     serviceGroups,
+				}).Info("Service groups changed, updating configuration")
+
+				if err := updatePrometheusConfig(configFile, serviceGroups); err != nil {
+					logrus.WithError(err).Error("Failed to update prometheus config")
 				} else {
-					previousTargets = targets
+					logrus.Info("Successfully updated prometheus configuration")
+					previousGroups = serviceGroups
 				}
 			}
 			targetsMu.Unlock()
@@ -322,11 +276,11 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	etcdURLScrape := cmd.String("scrape-etcd-url")
 	etcdBasePath := cmd.String("etcd-base-path")
 	scrapeEtcdPaths := strings.Split(cmd.String("scrape-etcd-paths"), ",")
-	scrapeInterval := cmd.String("scrape-interval")
-	scrapeTimeout := cmd.String("scrape-timeout")
-	evaluationInterval := cmd.String("evaluation-interval")
-	scheme := cmd.String("scheme")
-	tlsInsecure := cmd.String("tls-insecure")
+	scrapeInterval = cmd.String("scrape-interval")
+	scrapeTimeout = cmd.String("scrape-timeout")
+	evaluationInterval = cmd.String("evaluation-interval")
+	scheme = cmd.String("scheme")
+	tlsInsecure = cmd.String("tls-insecure")
 	etcdUsername := cmd.String("etcd-username")
 	etcdPassword := cmd.String("etcd-password")
 	etcdTimeout := cmd.Duration("etcd-timeout")
@@ -345,25 +299,26 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("failed to create etcd registry: %w", err)
 	}
 
-	// Create initial prometheus config without scrape paths
-	config := map[string]interface{}{
-		"scrapeInterval":     scrapeInterval,
-		"scrapeTimeout":      scrapeTimeout,
-		"evaluationInterval": evaluationInterval,
-		"scheme":             scheme,
-		"tlsInsecure":        tlsInsecure,
-	}
-
-	configFile := os.Getenv("PROMETHEUS_CONFIG_FILE")
+	configFile = os.Getenv("PROMETHEUS_CONFIG_FILE")
 	if configFile == "" {
 		configFile = PROM_CONFIG_FILE
 	}
 
-	if err := updatePrometheusConfig(configFile, config); err != nil {
+	// Verify admin credentials are set
+	if os.Getenv("PROMETHEUS_ADMIN_USERNAME") == "" || os.Getenv("PROMETHEUS_ADMIN_PASSWORD") == "" {
+		return fmt.Errorf("PROMETHEUS_ADMIN_USERNAME and PROMETHEUS_ADMIN_PASSWORD must be set")
+	}
+
+	if err := updatePrometheusConfig(configFile, []ServiceGroup{}); err != nil {
 		return fmt.Errorf("failed to update initial prometheus config: %w", err)
 	}
 
-	if err := createRulesFromENV("/rules.yml"); err != nil {
+	rulesFile := os.Getenv("PROMETHEUS_RULES_FILE")
+	if rulesFile == "" {
+		rulesFile = "/rules.yml"
+	}
+	
+	if err := createRulesFromENV(rulesFile); err != nil {
 		return fmt.Errorf("failed to create rules: %w", err)
 	}
 
