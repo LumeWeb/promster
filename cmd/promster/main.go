@@ -166,6 +166,13 @@ func areSourceTargetsEqual(a, b SourceTarget) bool {
 }
 
 func updatePrometheusConfig(configFile string, config map[string]interface{}) error {
+	adminUsername := os.Getenv("PROMETHEUS_ADMIN_USERNAME")
+	adminPassword := os.Getenv("PROMETHEUS_ADMIN_PASSWORD")
+	config["adminUsername"] = adminUsername
+	if adminPassword != "" {
+		config["adminPassword"] = adminPassword
+	}
+
 	contents, err := executeTemplate(config)
 	if err != nil {
 		return fmt.Errorf("failed to execute template: %w", err)
