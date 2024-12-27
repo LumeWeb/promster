@@ -186,34 +186,29 @@ func getScrapeTargets(registry *etcdregistry.EtcdRegistry, etcdPath string) []Se
 				authKey = username + ":" + password
 			}
 
-			// Create group key
-			groupKey := serviceName + "|" + authKey
+			// Create unique group key including node name
+			groupKey := fmt.Sprintf("%s|%s|%s", serviceName, node.Name, authKey)
 
-			group, exists := groupMap[groupKey]
-			if !exists {
-				group = &ServiceGroup{
-					Name:        serviceName,
-					Targets:     make([]string, 0),
-					MetricsPath: metricsPath,
-					NodeID:      node.Name,
-				}
-
-				// Only set auth if credentials exist
-				if authKey != "" {
-					username := node.Info["username"]
-					if username == "" {
-						username = "prometheus"
-					}
-					group.BasicAuth = &BasicAuth{
-						Username: username,
-						Password: node.Info["password"],
-					}
-				}
-
-				groupMap[groupKey] = group
+			group := &ServiceGroup{
+				Name:        serviceName,
+				Targets:     []string{address},
+				MetricsPath: metricsPath,
+				NodeID:      node.Name,
 			}
 
-			group.Targets = append(group.Targets, address)
+			// Only set auth if credentials exist
+			if authKey != "" {
+				username := node.Info["username"]
+				if username == "" {
+					username = "prometheus"
+				}
+				group.BasicAuth = &BasicAuth{
+					Username: username,
+					Password: node.Info["password"],
+				}
+			}
+
+			groupMap[groupKey] = group
 		}
 	}
 
