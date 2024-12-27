@@ -5,7 +5,7 @@ go 1.23.2
 require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/urfave/cli/v3 v3.0.0-beta1
-	go.lumeweb.com/etcd-registry v0.0.0-20241227125337-d05bfecd101d
+	go.lumeweb.com/etcd-registry v0.0.0-20241227133249-320d7597e317
 	golang.org/x/sys v0.28.0
 	gopkg.in/yaml.v2 v2.4.0
 )
