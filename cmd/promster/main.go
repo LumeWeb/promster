@@ -32,9 +32,10 @@ type BasicAuth struct {
 }
 
 type ServiceGroup struct {
-	Name      string     `json:"name"`
-	Targets   []string   `json:"targets"`
-	BasicAuth *BasicAuth `json:"basic_auth,omitempty"`
+	Name        string     `json:"name"`
+	Targets     []string   `json:"targets"`
+	BasicAuth   *BasicAuth `json:"basic_auth,omitempty"`
+	MetricsPath string     `json:"metrics_path"`
 }
 
 type PrometheusConfig struct {
@@ -124,6 +125,30 @@ func reloadPrometheus() error {
 	}
 }
 
+func parseAddress(address string) (host string, metricsPath string) {
+	// Default metrics path
+	metricsPath = "/metrics"
+	
+	// Remove scheme (http:// or https://)
+	if strings.Contains(address, "://") {
+		parts := strings.SplitN(address, "://", 2)
+		address = parts[1]
+	}
+	
+	// Extract path if exists
+	if strings.Contains(address, "/") {
+		parts := strings.SplitN(address, "/", 2)
+		host = parts[0]
+		if len(parts) > 1 {
+			metricsPath = "/" + parts[1]
+		}
+	} else {
+		host = address
+	}
+	
+	return host, metricsPath
+}
+
 func getScrapeTargets(registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []string) []ServiceGroup {
 	// Map to group targets by service name and auth
 	groupMap := make(map[string]*ServiceGroup)
@@ -137,7 +162,7 @@ func getScrapeTargets(registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []str
 
 		for _, node := range nodes {
 			serviceName := node.Name
-			address := node.Info["address"]
+			address, metricsPath := parseAddress(node.Info["address"])
 
 			// Create auth key for grouping
 			authKey := ""
@@ -155,8 +180,9 @@ func getScrapeTargets(registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []str
 			group, exists := groupMap[groupKey]
 			if !exists {
 				group = &ServiceGroup{
-					Name:    serviceName,
-					Targets: make([]string, 0),
+					Name:        serviceName,
+					Targets:     make([]string, 0),
+					MetricsPath: metricsPath,
 				}
 
 				// Only set auth if credentials exist
