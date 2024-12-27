@@ -23,6 +23,8 @@ scrape_configs:
       insecure_skip_verify: {{$.TlsInsecure}}
     static_configs:
       - targets: {{ .Targets }}
+        labels:
+          node_id: {{ .NodeID }}
     {{ if .BasicAuth }}
     basic_auth:
       username: {{ .BasicAuth.Username }}

@@ -36,6 +36,7 @@ type ServiceGroup struct {
 	Targets     []string   `json:"targets"`
 	BasicAuth   *BasicAuth `json:"basic_auth,omitempty"`
 	MetricsPath string     `json:"metrics_path"`
+	NodeID      string     `json:"node_id"`
 }
 
 type PrometheusConfig struct {
@@ -125,6 +126,7 @@ func reloadPrometheus() error {
 	}
 }
 
+
 func parseAddress(address string) (host string, metricsPath string) {
 	// Default metrics path
 	metricsPath = "/metrics"
@@ -161,7 +163,7 @@ func getScrapeTargets(registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []str
 		}
 
 		for _, node := range nodes {
-			serviceName := node.Name
+			serviceName := path
 			address, metricsPath := parseAddress(node.Info["address"])
 
 			// Create auth key for grouping
@@ -183,6 +185,7 @@ func getScrapeTargets(registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []str
 					Name:        serviceName,
 					Targets:     make([]string, 0),
 					MetricsPath: metricsPath,
+					NodeID:      node.Name,
 				}
 
 				// Only set auth if credentials exist
