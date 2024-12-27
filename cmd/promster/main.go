@@ -23,6 +23,7 @@ var prometheusTemplate string
 
 const (
 	PROM_TEMPLATE_FILE = "prometheus.yml.tmpl"
+	PROM_CONFIG_FILE   = "/prometheus.yml"
 )
 
 type BasicAuth struct {
@@ -164,13 +165,13 @@ func areSourceTargetsEqual(a, b SourceTarget) bool {
 	return true
 }
 
-func updatePrometheusConfig(prometheusFile string, config map[string]interface{}) error {
+func updatePrometheusConfig(configFile string, config map[string]interface{}) error {
 	contents, err := executeTemplate(config)
 	if err != nil {
 		return fmt.Errorf("failed to execute template: %w", err)
 	}
 
-	if err := writeConfigFile(prometheusFile, []byte(contents)); err != nil {
+	if err := writeConfigFile(configFile, []byte(contents)); err != nil {
 		return err
 	}
 
@@ -346,7 +347,12 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		"tlsInsecure":        tlsInsecure,
 	}
 
-	if err := updatePrometheusConfig("/prometheus.yml", config); err != nil {
+	configFile := os.Getenv("PROMETHEUS_CONFIG_FILE")
+	if configFile == "" {
+		configFile = PROM_CONFIG_FILE
+	}
+
+	if err := updatePrometheusConfig(configFile, config); err != nil {
 		return fmt.Errorf("failed to update initial prometheus config: %w", err)
 	}
 
