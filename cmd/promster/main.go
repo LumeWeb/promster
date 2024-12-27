@@ -126,17 +126,16 @@ func reloadPrometheus() error {
 	}
 }
 
-
 func parseAddress(address string) (host string, metricsPath string) {
 	// Default metrics path
 	metricsPath = "/metrics"
-	
+
 	// Remove scheme (http:// or https://)
 	if strings.Contains(address, "://") {
 		parts := strings.SplitN(address, "://", 2)
 		address = parts[1]
 	}
-	
+
 	// Extract path if exists
 	if strings.Contains(address, "/") {
 		parts := strings.SplitN(address, "/", 2)
@@ -147,24 +146,35 @@ func parseAddress(address string) (host string, metricsPath string) {
 	} else {
 		host = address
 	}
-	
+
 	return host, metricsPath
 }
 
-func getScrapeTargets(registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []string) []ServiceGroup {
+func getScrapeTargets(registry *etcdregistry.EtcdRegistry, etcdPath string) []ServiceGroup {
 	// Map to group targets by service name and auth
 	groupMap := make(map[string]*ServiceGroup)
 
-	for _, path := range scrapeEtcdPaths {
-		nodes, err := registry.GetServiceNodes(path)
+	// Get all service groups first
+	services, err := registry.GetServiceGroups()
+	if err != nil {
+		logrus.Warnf("Failed to get service groups: %v", err)
+		return nil
+	}
+
+	// For each service, get its nodes
+	for _, serviceName := range services {
+		nodes, err := registry.GetServiceNodes(serviceName)
 		if err != nil {
-			logrus.Warnf("Failed to get service nodes for path %s: %v", path, err)
+			logrus.Warnf("Failed to get nodes for service %s: %v", serviceName, err)
 			continue
 		}
 
 		for _, node := range nodes {
-			serviceName := path
 			address, metricsPath := parseAddress(node.Info["address"])
+			if address == "" {
+				logrus.Warnf("Invalid address for node %s in service %s", node.Name, serviceName)
+				continue
+			}
 
 			// Create auth key for grouping
 			authKey := ""
@@ -210,7 +220,9 @@ func getScrapeTargets(registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []str
 	// Convert map to slice
 	groups := make([]ServiceGroup, 0, len(groupMap))
 	for _, group := range groupMap {
-		groups = append(groups, *group)
+		if len(group.Targets) > 0 {
+			groups = append(groups, *group)
+		}
 	}
 
 	return groups
@@ -252,7 +264,7 @@ var (
 	configFile         string
 )
 
-func monitorTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry, scrapeEtcdPaths []string) error {
+func monitorTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry, etcdPath string) error {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -264,7 +276,7 @@ func monitorTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry, sc
 	for {
 		select {
 		case <-ticker.C:
-			serviceGroups := getScrapeTargets(registry, scrapeEtcdPaths)
+			serviceGroups := getScrapeTargets(registry, etcdPath)
 
 			targetsMu.Lock()
 			if !reflect.DeepEqual(serviceGroups, previousGroups) {
@@ -304,7 +316,6 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	// Get flag values
 	etcdURLScrape := cmd.String("scrape-etcd-url")
 	etcdBasePath := cmd.String("etcd-base-path")
-	scrapeEtcdPaths := strings.Split(cmd.String("scrape-etcd-paths"), ",")
 	scrapeInterval = cmd.String("scrape-interval")
 	scrapeTimeout = cmd.String("scrape-timeout")
 	evaluationInterval = cmd.String("evaluation-interval")
@@ -339,22 +350,22 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	if err := updatePrometheusConfig(configFile, []ServiceGroup{}); err != nil {
-		return fmt.Errorf("failed to update initial prometheus config: %w", err)
+		//	return fmt.Errorf("failed to update initial prometheus config: %w", err)
 	}
 
 	rulesFile := os.Getenv("PROMETHEUS_RULES_FILE")
 	if rulesFile == "" {
 		rulesFile = "/rules.yml"
 	}
-	
-	if err := createRulesFromENV(rulesFile); err != nil {
-		return fmt.Errorf("failed to create rules: %w", err)
-	}
-
+	/*
+		if err := createRulesFromENV(rulesFile); err != nil {
+			return fmt.Errorf("failed to create rules: %w", err)
+		}
+	*/
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	defer cancel()
 
-	return monitorTargets(ctx, registry, scrapeEtcdPaths)
+	return monitorTargets(ctx, registry, etcdBasePath)
 }
 
 func main() {
@@ -379,12 +390,6 @@ func main() {
 				Usage:    "Base ETCD path for the registry",
 				Required: true,
 				Sources:  cli.EnvVars("PROMSTER_ETCD_BASE_PATH"),
-			},
-			&cli.StringFlag{
-				Name:     "scrape-etcd-paths",
-				Usage:    "Comma-separated list of base ETCD paths for getting servers to be scrapped",
-				Required: true,
-				Sources:  cli.EnvVars("PROMSTER_SCRAPE_ETCD_PATHS"),
 			},
 			&cli.StringFlag{
 				Name:    "scrape-interval",
