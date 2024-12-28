@@ -17,9 +17,9 @@ type RetryConfig struct {
 var (
 	// EtcdRetry is configured for etcd operations
 	EtcdRetry = RetryConfig{
-		InitialInterval:     500 * time.Millisecond,
-		MaxInterval:         10 * time.Second,
-		RandomizationFactor: 0.1,
+		InitialInterval:     2 * time.Second,
+		MaxInterval:         30 * time.Second,
+		RandomizationFactor: 0.2,
 	}
 
 	// ConfigRetry is configured for Prometheus configuration operations

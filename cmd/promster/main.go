@@ -378,16 +378,28 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		"timeout":   etcdTimeout,
 	}).Info("Connecting to etcd")
 
-	registry, err := etcdregistry.NewEtcdRegistry(
-		strings.Split(etcdURLScrape, ","),
-		etcdBasePath,
-		etcdUsername,
-		etcdPassword,
-		etcdTimeout,
-		3,
+	var registry *etcdregistry.EtcdRegistry
+	_, err := util.RetryOperation(
+		func() (bool, error) {
+			reg, err := etcdregistry.NewEtcdRegistry(
+				strings.Split(etcdURLScrape, ","),
+				etcdBasePath,
+				etcdUsername,
+				etcdPassword,
+				etcdTimeout*2, // Double the timeout
+				5, // Increase max retries
+			)
+			if err != nil {
+				return false, fmt.Errorf("failed to initialize connection: %w", err)
+			}
+			registry = reg
+			return true, nil
+		},
+		util.EtcdRetry,
+		5,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to create etcd registry: %w", err)
+		return fmt.Errorf("failed to create etcd registry after retries: %w", err)
 	}
 
 	logrus.Info("Successfully connected to etcd")
