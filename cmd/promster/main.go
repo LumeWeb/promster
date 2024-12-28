@@ -2,14 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"go.lumeweb.com/etcd-registry/types"
-	"sort"
 	"io"
 	"net/http"
 	"os"
 	"os/signal"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"text/template"
@@ -67,6 +68,16 @@ func (sg *ServiceGroup) Validate() error {
 	return nil
 }
 
+var templateFuncs = template.FuncMap{
+	"quote": func(v interface{}) string {
+		return fmt.Sprintf("%q", v)
+	},
+	"toJson": func(v interface{}) string {
+		b, _ := json.Marshal(v)
+		return string(b)
+	},
+}
+
 func executeTemplate(data interface{}) (string, error) {
 	// Validate service groups before template execution
 	config, ok := data.(PrometheusConfig)
@@ -77,7 +88,7 @@ func executeTemplate(data interface{}) (string, error) {
 			}
 		}
 	}
-	tmpl, err := template.New(PROM_TEMPLATE_FILE).Parse(prometheusTemplate)
+	tmpl, err := template.New(PROM_TEMPLATE_FILE).Funcs(templateFuncs).Parse(prometheusTemplate)
 	if err != nil {
 		return "", err
 	}
