@@ -180,7 +180,13 @@ func getScrapeTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry) 
 
 				// Create a ServiceGroup for each node
 				for _, node := range nodes {
-					address := fmt.Sprintf("%s:%d", node.ID, node.Port)
+					// Use ingress_host from labels if available, fallback to node ID
+					hostname := node.ID
+					if ingressHost, ok := node.Labels["ingress_host"]; ok && ingressHost != "" {
+						hostname = ingressHost
+					}
+
+					address := fmt.Sprintf("%s:%d", hostname, node.Port)
 					if address == "" {
 						logrus.Warnf("Invalid address for node %s in service %s", node.ID, serviceName)
 						continue
