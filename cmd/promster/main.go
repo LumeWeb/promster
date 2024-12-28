@@ -650,24 +650,51 @@ var (
 	ErrStaleGroup    = errors.New("stale group error")
 )
 
-func isNodeHealthy(node types.Node) bool {
-	staleThreshold := 5 * time.Minute
-	if time.Since(node.LastSeen) > staleThreshold {
-		return false
-	}
-	return node.Status == "healthy"
+// isProductionEnvironment is a helper to check for production environment labels
+func isProductionEnvironment(labels map[string]string) bool {
+	env := labels["environment"]
+	return env == "production" || env == "prod"
 }
 
+
 func shouldCleanupEmptyGroup(group *types.ServiceGroup) bool {
-	// For now, always clean up empty groups
-	// This matches existing behavior but can be made more conservative
+	// Check protection labels in CommonLabels
+	if group.Spec.CommonLabels["no-cleanup"] == "true" || 
+	   group.Spec.CommonLabels["retain-empty"] == "true" {
+		return false
+	}
+
+	// Check environment - be more conservative in production
+	if isProductionEnvironment(group.Spec.CommonLabels) {
+		return false
+	}
+
+	// Default behavior - clean up empty groups in non-production
 	return true
 }
 
-func shouldCleanupStaleGroup(group *types.ServiceGroup) bool {
-	// For now, be conservative and don't clean up groups with nodes
-	// This can be enhanced with more sophisticated checks
-	return false
+func shouldCleanupStaleGroup(group *types.ServiceGroup, nodes []types.Node) bool {
+	// Check protection labels
+	if group.Spec.CommonLabels["no-cleanup"] == "true" || 
+	   group.Spec.CommonLabels["retain-stale"] == "true" {
+		return false
+	}
+
+	// Never clean up production by default
+	if isProductionEnvironment(group.Spec.CommonLabels) {
+		return false
+	}
+
+	// Check if all nodes have been stale for a significant time
+	const staleThreshold = 30 * time.Minute
+	for _, node := range nodes {
+		if time.Since(node.LastSeen) < staleThreshold {
+			return false // At least one node is recent
+		}
+	}
+
+	// All nodes are stale - clean up in non-production
+	return true
 }
 
 func checkStaleGroups(ctx context.Context, registry *etcdregistry.EtcdRegistry) error {
@@ -705,16 +732,8 @@ func checkStaleGroups(ctx context.Context, registry *etcdregistry.EtcdRegistry) 
 			continue
 		}
 
-		// Check each node's health
-		allNodesStale := true
-		for _, node := range nodes {
-			if isNodeHealthy(node) {
-				allNodesStale = false
-				break
-			}
-		}
-
-		if allNodesStale && shouldCleanupStaleGroup(group) {
+		// Check for stale groups
+		if shouldCleanupStaleGroup(group, nodes) {
 			if err := group.Delete(ctx); err != nil {
 				logrus.WithError(err).WithField("service", serviceName).
 					Error("Failed to cleanup stale group")
