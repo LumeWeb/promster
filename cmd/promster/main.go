@@ -309,6 +309,7 @@ var (
 	tlsInsecure        string
 	configFile         string
 	monitoringInterval time.Duration
+	serviceGroups      []ServiceGroup // Add serviceGroups to package vars
 
 	// Timer management
 	timerPool = sync.Pool{
@@ -361,17 +362,6 @@ func monitorTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry, er
 }
 
 func watchWithRetry(ctx context.Context, registry *etcdregistry.EtcdRegistry, errChan chan<- error) error {
-	// Get initial state
-	serviceGroups, err := getScrapeTargets(ctx, registry)
-	if err != nil {
-		return fmt.Errorf("failed to get initial state: %w", err)
-	}
-
-	// Apply initial configuration
-	if err := updatePrometheusConfig(configFile, serviceGroups); err != nil {
-		return fmt.Errorf("failed to apply initial config: %w", err)
-	}
-
 	// Start watching for changes with retry
 	watchChan, err := util.RetryOperation(
 		func() (<-chan types.WatchEvent, error) {
@@ -431,12 +421,16 @@ func watchWithRetry(ctx context.Context, registry *etcdregistry.EtcdRegistry, er
 
 				// Sort both slices for consistent comparison
 				sort.Slice(currentGroups, func(i, j int) bool {
-					return currentGroups[i].Name < currentGroups[j].Name ||
-						(currentGroups[i].Name == currentGroups[j].Name && currentGroups[i].NodeID < currentGroups[j].NodeID)
+					if currentGroups[i].Name != currentGroups[j].Name {
+						return currentGroups[i].Name < currentGroups[j].Name
+					}
+					return currentGroups[i].NodeID < currentGroups[j].NodeID
 				})
 				sort.Slice(newGroups, func(i, j int) bool {
-					return newGroups[i].Name < newGroups[j].Name ||
-						(newGroups[i].Name == newGroups[j].Name && newGroups[i].NodeID < newGroups[j].NodeID)
+					if newGroups[i].Name != newGroups[j].Name {
+						return newGroups[i].Name < newGroups[j].Name
+					}
+					return newGroups[i].NodeID < newGroups[j].NodeID
 				})
 
 				// Compare sorted states to avoid unnecessary updates
@@ -531,7 +525,16 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("PROMETHEUS_ADMIN_USERNAME and PROMETHEUS_ADMIN_PASSWORD must be set")
 	}
 
-	if err := updatePrometheusConfig(configFile, []ServiceGroup{}); err != nil {
+	// Get initial state once connected
+	serviceGroups, err := getScrapeTargets(ctx, registry)
+	if err != nil {
+		return fmt.Errorf("failed to get initial state: %w", err)
+	}
+
+	logrus.WithField("groups", len(serviceGroups)).Info("Retrieved initial service groups")
+
+	// Create initial config with actual state
+	if err := updatePrometheusConfig(configFile, serviceGroups); err != nil {
 		return fmt.Errorf("failed to update initial prometheus config: %w", err)
 	}
 	// Create error channels
