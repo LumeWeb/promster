@@ -46,10 +46,16 @@ go.lumeweb.com/etcd-registry v0.0.0-20241227125337-d05bfecd101d h1:PkJHtG4sYEsjy
 go.lumeweb.com/etcd-registry v0.0.0-20241227125337-d05bfecd101d/go.mod h1:YcYO0XCb+DGFIu1wfXf76ZDWvg6136AOxAsqZK9da3A=
 go.lumeweb.com/etcd-registry v0.0.0-20241227133249-320d7597e317 h1:l1PPtIwUmcS0I6ueCVECRuYWr2GHAEOfRVJXY7Rr220=
 go.lumeweb.com/etcd-registry v0.0.0-20241227133249-320d7597e317/go.mod h1:YcYO0XCb+DGFIu1wfXf76ZDWvg6136AOxAsqZK9da3A=
+go.lumeweb.com/etcd-registry v0.0.0-20241228013213-3af11cc06c51 h1:mDi38YscZtJa0gUK88FhnrU5a4VSYQ/u0gCrcaHOe2A=
+go.lumeweb.com/etcd-registry v0.0.0-20241228013213-3af11cc06c51/go.mod h1:YcYO0XCb+DGFIu1wfXf76ZDWvg6136AOxAsqZK9da3A=
+go.lumeweb.com/etcd-registry v0.0.0-20241228121109-64bfc134d6d1 h1:84j+pjhUMJYwx5ZTO68lsHJmeB5U7GL3HOYb1AArFCU=
+go.lumeweb.com/etcd-registry v0.0.0-20241228121109-64bfc134d6d1/go.mod h1:ZMUoeUnx8K3zSsRHj6MvOkir35KPVEP5Yz50oAQyMbA=
 go.uber.org/atomic v1.7.0 h1:ADUqmZGgLDDfbSL9ZmPxKTybcoEYHgpYfELNoN+7hsw=
 go.uber.org/atomic v1.7.0/go.mod h1:fEN4uk6kAWBTFdckzkM89CLk9XfWZrxpCo0nPH17wJc=
 go.uber.org/atomic v1.11.0 h1:ZvwS0R+56ePWxUNi+Atn9dWONBPp/AUETXlHW0DxSjE=
 go.uber.org/atomic v1.11.0/go.mod h1:LUxbIzbOniOlMKjJjyPfpl4v+PKK2cNJn91OQbhoJI0=
+go.uber.org/mock v0.5.0 h1:KAMbZvZPyBPWgD14IrIQ38QCyjwpvVVV6K/bHl1IwQU=
+go.uber.org/mock v0.5.0/go.mod h1:ge71pBPLYDk7QIi1LupWxdAykm7KIEFchiOqd6z7qMM=
 go.uber.org/multierr v1.6.0 h1:y6IPFStTAIT5Ytl7/XYmHvzXQ7S3g/IeZW9hyZ5thw4=
 go.uber.org/multierr v1.6.0/go.mod h1:cdWPpRnG4AhwMwsgIHip0KRBQjJy5kYEpYjJxpXp9iU=
 go.uber.org/multierr v1.11.0 h1:blXXJkSxSSfBVBlC76pxqeO+LN3aDfLQo+309xJstO0=

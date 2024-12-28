@@ -36,10 +36,8 @@ services:
     environment:
       - COMPONENT_NAME=testserver
       - COMPONENT_VERSION=1.0.0
-      - REGISTRY_ETCD_URL=http://etcd0:2379
-      - REGISTRY_ETCD_BASE=/webservers
-      - REGISTRY_SERVICE=generator
-      - REGISTRY_TTL=10
+      - PROMSTER_SCRAPE_ETCD_URL=http://etcd0:2379
+      - PROMSTER_ETCD_BASE_PATH=/webservers
     ports:
       - 3000
 
@@ -127,20 +125,32 @@ services:
 # ENV configurations
 
 * LOG_LEVEL 'info'
-* SCRAPE_ETCD_URL etcd URLs to connect to get list of metrics endpoints to be scraped
-* SCRAPE_ETCD_PATH base path for services registered
-* SCRAPE_PATHS uri for getting metrics. ex.: /metrics
-* SCRAPE_MATCH_REGEX when using /federated scrape paths, this regex will be used to match which metrics will be returned by the federate endpoint
-* SCRAPE_SHARD_ENABLE Enable sharding distribution among targets so that each Promster instance will scrape a different set of targets, enabling distribution of load among instances. Defaults to true. Use false if you want all instances to scrape the same set of targets. This maybe useful, for example, if you want to create a set of instances with the same data to distribute user queries among instances with the same dataset
-* SCRAPE_INTERVAL time between scrapes for automatic scraping
-* SCRAPE_TIMEOUT time for a timeout signal
+## Environment Variables
 
-* SCHEME Target's scheme. Either http or https
-* TLS_INSECURE Disable validation of the server certificate. Either true or false
+### Core Configuration
+* `PROMSTER_LOG_LEVEL` - Log level (debug, info, warning, error). Default: info
+* `PROMSTER_SCRAPE_ETCD_URL` - ETCD URLs for service discovery
+* `PROMSTER_ETCD_BASE_PATH` - Base ETCD path for service discovery
+* `PROMSTER_ETCD_USERNAME` - ETCD username for authentication (optional)
+* `PROMSTER_ETCD_PASSWORD` - ETCD password for authentication (optional)
+* `PROMSTER_ETCD_TIMEOUT` - ETCD connection timeout. Default: 30s
 
-* EVALUATION_INTERVAL time between record rules and alerts evaliation
-* RETENTION_TIME time during which the data will be stored
+### Prometheus Configuration
+* `PROMSTER_SCRAPE_INTERVAL` - Time between scrapes. Default: 30s
+* `PROMSTER_SCRAPE_TIMEOUT` - Timeout for scrape requests. Default: 30s
+* `PROMSTER_EVALUATION_INTERVAL` - Time between rule evaluations. Default: 30s
+* `PROMSTER_SCHEME` - Target's scheme (http/https). Default: http
+* `PROMSTER_TLS_INSECURE` - Disable TLS certificate validation (true/false). Default: false
+* `PROMSTER_MONITORING_INTERVAL` - How often to check for service changes. Default: 5s
 
-* RECORD_RULE_1_NAME metric name that will receive contents for expr 1. where '1' maybe any sequential number for multiple rules creation
-* RECORD_RULE_1_EXPR expression/query that will generate contents to the metric
-* RECORD_RULE_1_LABELS a comma separated list of key/value pairs in the format `labelName:labelValue` to work with Prometheus's label redefinition features
+### Prometheus Authentication
+* `PROMETHEUS_ADMIN_USERNAME` - Username for Prometheus admin API (required)
+* `PROMETHEUS_ADMIN_PASSWORD` - Password for Prometheus admin API (required)
+* `PROMETHEUS_CONFIG_FILE` - Path to Prometheus config file. Default: /prometheus.yml
+
+### Recording Rules
+* `RECORD_RULE_[N]_NAME` - Name for recording rule N
+* `RECORD_RULE_[N]_EXPR` - PromQL expression for recording rule N
+* `RECORD_RULE_[N]_LABELS` - Optional labels for recording rule N (format: key1:value1,key2:value2)
+
+Where [N] is a sequential number (1, 2, 3, etc.) for multiple rules.

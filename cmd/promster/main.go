@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	_ "embed"
+	"errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v3"
 	etcdregistry "go.lumeweb.com/etcd-registry"
@@ -32,11 +34,12 @@ type BasicAuth struct {
 }
 
 type ServiceGroup struct {
-	Name        string     `json:"name"`
-	Targets     []string   `json:"targets"`
-	BasicAuth   *BasicAuth `json:"basic_auth,omitempty"`
-	MetricsPath string     `json:"metrics_path"`
-	NodeID      string     `json:"node_id"`
+	Name        string            `json:"name"`
+	Targets     []string          `json:"targets"`
+	BasicAuth   *BasicAuth        `json:"basic_auth,omitempty"`
+	MetricsPath string            `json:"metrics_path"`
+	NodeID      string            `json:"node_id"`
+	Labels      map[string]string `json:"labels,omitempty"`
 }
 
 type PrometheusConfig struct {
@@ -99,7 +102,10 @@ func writeConfigFile(filename string, data []byte) error {
 	}
 
 	if err := os.Rename(tempFile, filename); err != nil {
-		os.Remove(tempFile) // Clean up temp file
+		err := os.Remove(tempFile)
+		if err != nil {
+			return fmt.Errorf("failed to remove temp file: %w", err)
+		} // Clean up temp file
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
@@ -110,7 +116,9 @@ func reloadPrometheus() error {
 	adminUsername := os.Getenv("PROMETHEUS_ADMIN_USERNAME")
 	adminPassword := os.Getenv("PROMETHEUS_ADMIN_PASSWORD")
 	if adminUsername != "" && adminPassword != "" {
-		req, err := http.NewRequest("POST", "http://localhost:9090/-/reload", nil)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, "POST", "http://localhost:9090/-/reload", nil)
 		if err != nil {
 			return fmt.Errorf("failed to create request: %w", err)
 		}
@@ -119,112 +127,88 @@ func reloadPrometheus() error {
 		if err != nil {
 			return fmt.Errorf("failed to reload prometheus config: %w", err)
 		}
-		defer resp.Body.Close()
+		defer func(Body io.ReadCloser) {
+			err := Body.Close()
+			if err != nil {
+				logrus.Errorf("Failed to close response body: %v", err)
+			}
+		}(resp.Body)
 		return nil
 	} else {
 		return fmt.Errorf("PROMETHEUS_ADMIN_USERNAME and PROMETHEUS_ADMIN_PASSWORD must be set")
 	}
 }
 
-func parseAddress(address string) (host string, metricsPath string) {
-	// Default metrics path
-	metricsPath = "/metrics"
-
-	// Remove scheme (http:// or https://)
-	if strings.Contains(address, "://") {
-		parts := strings.SplitN(address, "://", 2)
-		address = parts[1]
-	}
-
-	// Extract path if exists
-	if strings.Contains(address, "/") {
-		parts := strings.SplitN(address, "/", 2)
-		host = parts[0]
-		if len(parts) > 1 {
-			metricsPath = "/" + parts[1]
-		}
-	} else {
-		host = address
-	}
-
-	return host, metricsPath
-}
-
-func getScrapeTargets(registry *etcdregistry.EtcdRegistry, etcdPath string) []ServiceGroup {
-	// Map to group targets by service name and auth
-	groupMap := make(map[string]*ServiceGroup)
-
-	// Get all service groups first
-	services, err := registry.GetServiceGroups()
+func getScrapeTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry) ([]ServiceGroup, error) {
+	// Get all service groups
+	services, err := registry.GetServiceGroups(ctx)
 	if err != nil {
-		logrus.Warnf("Failed to get service groups: %v", err)
-		return nil
+		return nil, fmt.Errorf("failed to get service groups: %w", err)
 	}
 
-	// For each service, get its nodes
+	var groups []ServiceGroup
+
+	// For each service, get its group and nodes
 	for _, serviceName := range services {
-		nodes, err := registry.GetServiceNodes(serviceName)
+		group, err := registry.GetServiceGroup(ctx, serviceName)
 		if err != nil {
-			logrus.Warnf("Failed to get nodes for service %s: %v", serviceName, err)
+			logrus.WithError(err).Warnf("Failed to get service group %s", serviceName)
 			continue
 		}
 
+		nodes, err := group.GetNodes(ctx)
+		if err != nil {
+			logrus.WithError(err).Warnf("Failed to get nodes for service %s", serviceName)
+			continue
+		}
+
+		// Create a ServiceGroup for each node
 		for _, node := range nodes {
-			address, metricsPath := parseAddress(node.Info["address"])
+			address := fmt.Sprintf("%s:%d", node.ID, node.Port)
 			if address == "" {
-				logrus.Warnf("Invalid address for node %s in service %s", node.Name, serviceName)
+				logrus.Warnf("Invalid address for node %s in service %s", node.ID, serviceName)
 				continue
 			}
 
-			// Create auth key for grouping
-			authKey := ""
-			if password, ok := node.Info["password"]; ok {
-				username := node.Info["username"]
-				if username == "" {
-					username = "prometheus" // default username
-				}
-				authKey = username + ":" + password
+			metricsPath := node.MetricsPath
+			if metricsPath == "" {
+				metricsPath = "/metrics"
 			}
 
-			// Create unique group key including node name
-			groupKey := fmt.Sprintf("%s|%s|%s", serviceName, node.Name, authKey)
+			// Merge group common labels with node labels
+			labels := make(map[string]string)
+			for k, v := range group.Spec.CommonLabels {
+				labels[k] = v
+			}
+			for k, v := range node.Labels {
+				labels[k] = v
+			}
 
-			group := &ServiceGroup{
+			sg := ServiceGroup{
 				Name:        serviceName,
 				Targets:     []string{address},
 				MetricsPath: metricsPath,
-				NodeID:      node.Name,
+				NodeID:      node.ID,
+				Labels:      labels,
 			}
 
-			// Only set auth if credentials exist
-			if authKey != "" {
-				username := node.Info["username"]
-				if username == "" {
-					username = "prometheus"
-				}
-				group.BasicAuth = &BasicAuth{
-					Username: username,
-					Password: node.Info["password"],
+			// Use auth from group spec if available
+			if group.Spec.Username != "" && group.Spec.Password != "" {
+				sg.BasicAuth = &BasicAuth{
+					Username: group.Spec.Username,
+					Password: group.Spec.Password,
 				}
 			}
 
-			groupMap[groupKey] = group
+			groups = append(groups, sg)
 		}
 	}
 
-	// Convert map to slice
-	groups := make([]ServiceGroup, 0, len(groupMap))
-	for _, group := range groupMap {
-		if len(group.Targets) > 0 {
-			groups = append(groups, *group)
-		}
-	}
-
-	return groups
+	return groups, nil
 }
 
 func createPrometheusConfig(serviceGroups []ServiceGroup) PrometheusConfig {
-	return PrometheusConfig{
+	config := PrometheusConfig{
 		ServiceGroups:      serviceGroups,
 		ScrapeInterval:     scrapeInterval,
 		ScrapeTimeout:      scrapeTimeout,
@@ -234,6 +218,16 @@ func createPrometheusConfig(serviceGroups []ServiceGroup) PrometheusConfig {
 		AdminUsername:      os.Getenv("PROMETHEUS_ADMIN_USERNAME"),
 		AdminPassword:      os.Getenv("PROMETHEUS_ADMIN_PASSWORD"),
 	}
+
+	// Validate all service groups
+	for _, sg := range config.ServiceGroups {
+		if err := sg.Validate(); err != nil {
+			logrus.WithError(err).Error("Invalid service group configuration")
+			return PrometheusConfig{} // Return empty config on validation failure
+		}
+	}
+
+	return config
 }
 
 func updatePrometheusConfig(configFile string, serviceGroups []ServiceGroup) error {
@@ -243,8 +237,9 @@ func updatePrometheusConfig(configFile string, serviceGroups []ServiceGroup) err
 		return fmt.Errorf("failed to execute template: %w", err)
 	}
 
+	logrus.WithField("config_file", configFile).Debug("Writing new configuration")
 	if err := writeConfigFile(configFile, []byte(contents)); err != nil {
-		return err
+		return fmt.Errorf("failed to write config: %w", err)
 	}
 
 	return reloadPrometheus()
@@ -257,10 +252,11 @@ var (
 	scheme             string
 	tlsInsecure        string
 	configFile         string
+	monitoringInterval time.Duration
 )
 
-func monitorTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry, etcdPath string) error {
-	ticker := time.NewTicker(5 * time.Second)
+func monitorTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry, errChan chan<- error) error {
+	ticker := time.NewTicker(monitoringInterval)
 	defer ticker.Stop()
 
 	var (
@@ -271,23 +267,32 @@ func monitorTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry, et
 	for {
 		select {
 		case <-ticker.C:
-			serviceGroups := getScrapeTargets(registry, etcdPath)
+			serviceGroups, err := getScrapeTargets(ctx, registry)
+			if err != nil {
+				logrus.WithError(err).Error("Failed to get scrape targets")
+				errChan <- fmt.Errorf("%w: failed to get scrape targets: %v", ErrMonitoring, err)
+				continue
+			}
 
 			targetsMu.Lock()
-			if !reflect.DeepEqual(serviceGroups, previousGroups) {
+			groupsChanged := !reflect.DeepEqual(serviceGroups, previousGroups)
+			targetsMu.Unlock()
+
+			if groupsChanged {
 				logrus.WithFields(logrus.Fields{
 					"num_groups": len(serviceGroups),
 					"groups":     serviceGroups,
 				}).Info("Service groups changed, updating configuration")
 
 				if err := updatePrometheusConfig(configFile, serviceGroups); err != nil {
-					logrus.WithError(err).Error("Failed to update prometheus config")
+					errChan <- fmt.Errorf("failed to update prometheus config: %w", err)
 				} else {
 					logrus.Info("Successfully updated prometheus configuration")
+					targetsMu.Lock()
 					previousGroups = serviceGroups
+					targetsMu.Unlock()
 				}
 			}
-			targetsMu.Unlock()
 
 		case <-ctx.Done():
 			return ctx.Err()
@@ -319,9 +324,14 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	etcdUsername := cmd.String("etcd-username")
 	etcdPassword := cmd.String("etcd-password")
 	etcdTimeout := cmd.Duration("etcd-timeout")
+	monitoringInterval = cmd.Duration("monitoring-interval")
 
 	logrus.Info("====Starting Promster====")
-	time.Sleep(5 * time.Second)
+	logrus.WithFields(logrus.Fields{
+		"endpoints": etcdURLScrape,
+		"basePath":  etcdBasePath,
+		"timeout":   etcdTimeout,
+	}).Info("Connecting to etcd")
 
 	registry, err := etcdregistry.NewEtcdRegistry(
 		strings.Split(etcdURLScrape, ","),
@@ -329,10 +339,13 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		etcdUsername,
 		etcdPassword,
 		etcdTimeout,
+		3,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create etcd registry: %w", err)
 	}
+
+	logrus.Info("Successfully connected to etcd")
 
 	configFile = os.Getenv("PROMETHEUS_CONFIG_FILE")
 	if configFile == "" {
@@ -345,23 +358,94 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	if err := updatePrometheusConfig(configFile, []ServiceGroup{}); err != nil {
-		//	return fmt.Errorf("failed to update initial prometheus config: %w", err)
+		return fmt.Errorf("failed to update initial prometheus config: %w", err)
+	}
+	// Create error channels
+	errChan := make(chan error, 100)
+	defer close(errChan)
+
+	// Error handling function
+	handleError := func(err error, category string) {
+		if err != nil {
+			var baseErr error
+			switch category {
+			case "monitoring":
+				baseErr = ErrMonitoring
+			case "configuration":
+				baseErr = ErrConfiguration
+			default:
+				baseErr = errors.New("unknown error")
+			}
+			errChan <- fmt.Errorf("%w: %v", baseErr, err)
+		}
 	}
 
-	rulesFile := os.Getenv("PROMETHEUS_RULES_FILE")
-	if rulesFile == "" {
-		rulesFile = "/rules.yml"
-	}
-	/*
-		if err := createRulesFromENV(rulesFile); err != nil {
-			return fmt.Errorf("failed to create rules: %w", err)
-		}
-	*/
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	defer cancel()
 
-	return monitorTargets(ctx, registry, etcdBasePath)
+	// Start error handling goroutine
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case err := <-errChan:
+				if err != nil {
+					logrus.WithError(err).Error("Registry error occurred")
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Start monitoring in background
+	monitorCtx, stopMonitor := context.WithCancel(ctx)
+	monitorDone := make(chan struct{})
+	go func() {
+		defer close(monitorDone)
+		if err := monitorTargets(monitorCtx, registry, errChan); err != nil {
+			if err == context.Canceled {
+				logrus.Info("Service monitoring stopped due to shutdown")
+			} else {
+				handleError(err, "monitoring")
+				logrus.WithError(err).Error("Service monitoring stopped unexpectedly")
+			}
+		}
+	}()
+
+	// Wait for shutdown signal
+	<-ctx.Done()
+	logrus.Info("Shutting down gracefully...")
+
+	// Stop monitoring first
+	stopMonitor()
+	select {
+	case <-monitorDone:
+		logrus.Info("Monitoring stopped cleanly")
+	case <-time.After(3 * time.Second):
+		logrus.Warn("Monitoring stop timed out")
+	}
+
+	// Wait for error handling goroutine to finish
+	wg.Wait()
+
+	// Close registry connection
+	if err := registry.Close(); err != nil {
+		logrus.WithError(err).Error("Error during registry shutdown")
+	} else {
+		logrus.Info("Registry connection closed")
+	}
+
+	return nil
 }
+
+// Error types
+var (
+	ErrMonitoring    = errors.New("monitoring error")
+	ErrConfiguration = errors.New("configuration error")
+)
 
 func main() {
 	cmd := &cli.Command{
@@ -431,6 +515,12 @@ func main() {
 				Value:   30 * time.Second,
 				Usage:   "ETCD timeout",
 				Sources: cli.EnvVars("PROMSTER_ETCD_TIMEOUT"),
+			},
+			&cli.DurationFlag{
+				Name:    "monitoring-interval",
+				Value:   5 * time.Second,
+				Usage:   "How often to check for service changes",
+				Sources: cli.EnvVars("PROMSTER_MONITORING_INTERVAL"),
 			},
 		},
 		Action: run,

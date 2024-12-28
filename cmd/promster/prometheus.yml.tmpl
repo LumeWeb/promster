@@ -12,23 +12,27 @@ scrape_configs:
       - targets: ['localhost:9090']
     {{ if .AdminPassword }}
     basic_auth:
-      username: {{.AdminUsername}}
-      password: {{.AdminPassword}}
+      username: "{{.AdminUsername}}"
+      password: "{{.AdminPassword}}"
     {{ end }}
 
-  {{ range .ServiceGroups }}
+  {{- if .ServiceGroups }}
+  {{- range .ServiceGroups }}
   - job_name: '{{ .Name }}'
-    scheme: {{$.Scheme}}
+    scheme: "{{$.Scheme}}"
     tls_config:
-      insecure_skip_verify: {{$.TlsInsecure}}
+      insecure_skip_verify: {{if eq $.TlsInsecure "true"}}true{{else}}false{{end}}
     static_configs:
-      - targets: {{ .Targets }}
+      - targets: {{ printf "%#v" .Targets }}
         labels:
-          node_id: {{ .NodeID }}
+          {{- range $key, $value := .Labels }}
+          {{ $key }}: "{{ $value }}"
+          {{- end }}
     {{ if .BasicAuth }}
     basic_auth:
-      username: {{ .BasicAuth.Username }}
-      password: {{ .BasicAuth.Password }}
+      username: "{{ .BasicAuth.Username }}"
+      password: "{{ .BasicAuth.Password }}"
     {{ end }}
-    metrics_path: {{ .MetricsPath }}
-  {{ end }}
+    metrics_path: "{{ .MetricsPath }}"
+  {{- end }}
+  {{- end }}
