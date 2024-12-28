@@ -42,6 +42,8 @@ go.etcd.io/etcd/client/v3 v3.5.17 h1:o48sINNeWz5+pjy/Z0+HKpj/xSnBkuVhVvXkjEXbqZY
 go.etcd.io/etcd/client/v3 v3.5.17/go.mod h1:j2d4eXTHWkT2ClBgnnEPm/Wuu7jsqku41v9DZ3OtjQo=
 go.lumeweb.com/etcd-registry v0.0.0-20241228121109-64bfc134d6d1 h1:84j+pjhUMJYwx5ZTO68lsHJmeB5U7GL3HOYb1AArFCU=
 go.lumeweb.com/etcd-registry v0.0.0-20241228121109-64bfc134d6d1/go.mod h1:ZMUoeUnx8K3zSsRHj6MvOkir35KPVEP5Yz50oAQyMbA=
+go.lumeweb.com/etcd-registry v0.0.0-20241228190737-b9daa9c6bd1d h1:wy+M25iCrU7SUykketbTb48jg5v45EzMQ0FgslD1/7s=
+go.lumeweb.com/etcd-registry v0.0.0-20241228190737-b9daa9c6bd1d/go.mod h1:ZMUoeUnx8K3zSsRHj6MvOkir35KPVEP5Yz50oAQyMbA=
 go.opentelemetry.io/otel v1.31.0 h1:NsJcKPIW0D0H3NgzPDHmo0WW6SptzPdqg/L1zsIm2hY=
 go.opentelemetry.io/otel v1.31.0/go.mod h1:O0C14Yl9FgkjqcCZAsE053C13OaddMYr/hz6clDkEJE=
 go.opentelemetry.io/otel/metric v1.31.0 h1:FSErL0ATQAmYHUIzSezZibnyVlft1ybhy4ozRPcF2fE=
