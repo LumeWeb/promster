@@ -345,6 +345,26 @@ func (t *safeTimer) Stop() bool {
 }
 
 func monitorTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry, errChan chan<- error) error {
+	// Create ticker for stale check
+	staleCheckTicker := time.NewTicker(5 * time.Minute)
+	defer staleCheckTicker.Stop()
+
+	// Start stale check loop in separate goroutine
+	go func() {
+		for {
+			select {
+			case <-staleCheckTicker.C:
+				if err := checkStaleGroups(ctx, registry); err != nil {
+					logrus.WithError(err).Error("Failed to check stale groups")
+					errChan <- fmt.Errorf("%w: %v", ErrStaleGroup, err)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Main watch loop
 	for {
 		if err := watchWithRetry(ctx, registry, errChan); err != nil {
 			if ctx.Err() != nil {
@@ -622,7 +642,85 @@ func run(ctx context.Context, cmd *cli.Command) error {
 var (
 	ErrMonitoring    = errors.New("monitoring error")
 	ErrConfiguration = errors.New("configuration error")
+	ErrStaleGroup    = errors.New("stale group error")
 )
+
+func isNodeHealthy(node types.Node) bool {
+	staleThreshold := 5 * time.Minute
+	if time.Since(node.LastSeen) > staleThreshold {
+		return false
+	}
+	return node.Status == "healthy"
+}
+
+func shouldCleanupEmptyGroup(group *types.ServiceGroup) bool {
+	// For now, always clean up empty groups
+	// This matches existing behavior but can be made more conservative
+	return true
+}
+
+func shouldCleanupStaleGroup(group *types.ServiceGroup) bool {
+	// For now, be conservative and don't clean up groups with nodes
+	// This can be enhanced with more sophisticated checks
+	return false
+}
+
+func checkStaleGroups(ctx context.Context, registry *etcdregistry.EtcdRegistry) error {
+	services, err := registry.GetServiceGroups(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get service groups: %w", err)
+	}
+
+	for _, serviceName := range services {
+		group, err := registry.GetServiceGroup(ctx, serviceName)
+		if err != nil {
+			logrus.WithError(err).WithField("service", serviceName).
+				Debug("Failed to get service group")
+			continue
+		}
+
+		nodes, err := group.GetNodes(ctx)
+		if err != nil {
+			logrus.WithError(err).WithField("service", serviceName).
+				Debug("Failed to get nodes")
+			continue
+		}
+
+		// If group has no nodes, check if it should be cleaned up
+		if len(nodes) == 0 {
+			if shouldCleanupEmptyGroup(group) {
+				if err := group.Delete(ctx); err != nil {
+					logrus.WithError(err).WithField("service", serviceName).
+						Error("Failed to cleanup empty group")
+				} else {
+					logrus.WithField("service", serviceName).
+						Info("Cleaned up empty group")
+				}
+			}
+			continue
+		}
+
+		// Check each node's health
+		allNodesStale := true
+		for _, node := range nodes {
+			if isNodeHealthy(node) {
+				allNodesStale = false
+				break
+			}
+		}
+
+		if allNodesStale && shouldCleanupStaleGroup(group) {
+			if err := group.Delete(ctx); err != nil {
+				logrus.WithError(err).WithField("service", serviceName).
+					Error("Failed to cleanup stale group")
+			} else {
+				logrus.WithField("service", serviceName).
+					Info("Cleaned up stale group")
+			}
+		}
+	}
+	return nil
+}
 
 func main() {
 	cmd := &cli.Command{
