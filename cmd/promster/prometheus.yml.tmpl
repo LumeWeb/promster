@@ -20,7 +20,7 @@ scrape_configs:
     tls_config:
       insecure_skip_verify: {{if eq $.TlsInsecure "true"}}true{{else}}false{{end}}
     static_configs:
-      - targets: {{ printf "%#v" .Targets }}
+      - targets: {{ .Targets }}
         labels:
           {{- range $key, $value := .Labels }}
           {{ $key }}: "{{ $value }}"
