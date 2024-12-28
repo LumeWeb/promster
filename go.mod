@@ -3,6 +3,7 @@ module go.lumeweb.com/promster
 go 1.23.2
 
 require (
+	github.com/cenkalti/backoff/v5 v5.0.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/urfave/cli/v3 v3.0.0-beta1
 	go.lumeweb.com/etcd-registry v0.0.0-20241228121109-64bfc134d6d1
@@ -10,7 +11,6 @@ require (
 )
 
 require (
-	github.com/cenkalti/backoff/v5 v5.0.0 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect

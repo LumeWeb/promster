@@ -63,14 +63,6 @@ func (sg *ServiceGroup) Validate() error {
 	if len(sg.Targets) == 0 {
 		return fmt.Errorf("service group %s must have at least one target", sg.Name)
 	}
-	if sg.BasicAuth != nil {
-		if sg.BasicAuth.Username == "" {
-			return fmt.Errorf("service group %s basic auth username cannot be empty", sg.Name)
-		}
-		if sg.BasicAuth.Password == "" {
-			return fmt.Errorf("service group %s basic auth password cannot be empty", sg.Name)
-		}
-	}
 	return nil
 }
 
@@ -214,8 +206,8 @@ func getScrapeTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry) 
 						Labels:      labels,
 					}
 
-					// Use auth from group spec if available
-					if group.Spec.Username != "" && group.Spec.Password != "" {
+					// Use auth from group spec if both username and password are available
+					if group.Spec.Password != "" {
 						sg.BasicAuth = &BasicAuth{
 							Username: group.Spec.Username,
 							Password: group.Spec.Password,
