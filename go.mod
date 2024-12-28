@@ -10,6 +10,7 @@ require (
 )
 
 require (
+	github.com/cenkalti/backoff/v5 v5.0.0 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect

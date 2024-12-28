@@ -19,6 +19,7 @@ import (
 	"github.com/urfave/cli/v3"
 	"gopkg.in/yaml.v2"
 	etcdregistry "go.lumeweb.com/etcd-registry"
+	"go.lumeweb.com/promster/pkg/util"
 )
 
 //go:embed prometheus.yml.tmpl
@@ -116,96 +117,115 @@ func writeConfigFile(filename string, data []byte) error {
 func reloadPrometheus() error {
 	adminUsername := os.Getenv("PROMETHEUS_ADMIN_USERNAME")
 	adminPassword := os.Getenv("PROMETHEUS_ADMIN_PASSWORD")
-	if adminUsername != "" && adminPassword != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, "POST", "http://localhost:9090/-/reload", nil)
-		if err != nil {
-			return fmt.Errorf("failed to create request: %w", err)
-		}
-		req.SetBasicAuth(adminUsername, adminPassword)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("failed to reload prometheus config: %w", err)
-		}
-		defer func(Body io.ReadCloser) {
-			err := Body.Close()
-			if err != nil {
-				logrus.Errorf("Failed to close response body: %v", err)
-			}
-		}(resp.Body)
-		return nil
-	} else {
+	if adminUsername == "" || adminPassword == "" {
 		return fmt.Errorf("PROMETHEUS_ADMIN_USERNAME and PROMETHEUS_ADMIN_PASSWORD must be set")
 	}
+
+	_, err := util.RetryOperation(
+		func() (bool, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			req, err := http.NewRequestWithContext(ctx, "POST", "http://localhost:9090/-/reload", nil)
+			if err != nil {
+				return false, fmt.Errorf("failed to create request: %w", err)
+			}
+			req.SetBasicAuth(adminUsername, adminPassword)
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return false, fmt.Errorf("failed to reload prometheus config: %w", err)
+			}
+			defer func(Body io.ReadCloser) {
+				err := Body.Close()
+				if err != nil {
+					logrus.Errorf("Failed to close response body: %v", err)
+				}
+			}(resp.Body)
+
+			return true, nil
+		},
+		util.ConfigRetry,
+		3,
+	)
+
+	return err
 }
 
 func getScrapeTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry) ([]ServiceGroup, error) {
-	// Get all service groups
-	services, err := registry.GetServiceGroups(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get service groups: %w", err)
-	}
-
-	var groups []ServiceGroup
-
-	// For each service, get its group and nodes
-	for _, serviceName := range services {
-		group, err := registry.GetServiceGroup(ctx, serviceName)
-		if err != nil {
-			logrus.WithError(err).Warnf("Failed to get service group %s", serviceName)
-			continue
-		}
-
-		nodes, err := group.GetNodes(ctx)
-		if err != nil {
-			logrus.WithError(err).Warnf("Failed to get nodes for service %s", serviceName)
-			continue
-		}
-
-		// Create a ServiceGroup for each node
-		for _, node := range nodes {
-			address := fmt.Sprintf("%s:%d", node.ID, node.Port)
-			if address == "" {
-				logrus.Warnf("Invalid address for node %s in service %s", node.ID, serviceName)
-				continue
+	groups, err := util.RetryOperation(
+		func() ([]ServiceGroup, error) {
+			// Get all service groups
+			services, err := registry.GetServiceGroups(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get service groups: %w", err)
 			}
 
-			metricsPath := node.MetricsPath
-			if metricsPath == "" {
-				metricsPath = "/metrics"
-			}
+			var groups []ServiceGroup
 
-			// Merge group common labels with node labels
-			labels := make(map[string]string)
-			for k, v := range group.Spec.CommonLabels {
-				labels[k] = v
-			}
-			for k, v := range node.Labels {
-				labels[k] = v
-			}
+			// For each service, get its group and nodes
+			for _, serviceName := range services {
+				group, err := registry.GetServiceGroup(ctx, serviceName)
+				if err != nil {
+					logrus.WithError(err).Warnf("Failed to get service group %s", serviceName)
+					continue
+				}
 
-			sg := ServiceGroup{
-				Name:        serviceName,
-				Targets:     []string{address},
-				MetricsPath: metricsPath,
-				NodeID:      node.ID,
-				Labels:      labels,
-			}
+				nodes, err := group.GetNodes(ctx)
+				if err != nil {
+					logrus.WithError(err).Warnf("Failed to get nodes for service %s", serviceName)
+					continue
+				}
 
-			// Use auth from group spec if available
-			if group.Spec.Username != "" && group.Spec.Password != "" {
-				sg.BasicAuth = &BasicAuth{
-					Username: group.Spec.Username,
-					Password: group.Spec.Password,
+				// Create a ServiceGroup for each node
+				for _, node := range nodes {
+					address := fmt.Sprintf("%s:%d", node.ID, node.Port)
+					if address == "" {
+						logrus.Warnf("Invalid address for node %s in service %s", node.ID, serviceName)
+						continue
+					}
+
+					metricsPath := node.MetricsPath
+					if metricsPath == "" {
+						metricsPath = "/metrics"
+					}
+
+					// Merge group common labels with node labels
+					labels := make(map[string]string)
+					for k, v := range group.Spec.CommonLabels {
+						labels[k] = v
+					}
+					for k, v := range node.Labels {
+						labels[k] = v
+					}
+
+					sg := ServiceGroup{
+						Name:        serviceName,
+						Targets:     []string{address},
+						MetricsPath: metricsPath,
+						NodeID:      node.ID,
+						Labels:      labels,
+					}
+
+					// Use auth from group spec if available
+					if group.Spec.Username != "" && group.Spec.Password != "" {
+						sg.BasicAuth = &BasicAuth{
+							Username: group.Spec.Username,
+							Password: group.Spec.Password,
+						}
+					}
+
+					groups = append(groups, sg)
 				}
 			}
 
-			groups = append(groups, sg)
-		}
-	}
+			return groups, nil
+		},
+		util.EtcdRetry,
+		3,
+	)
 
-	return groups, nil
+	return groups, err
 }
 
 func createPrometheusConfig(serviceGroups []ServiceGroup) PrometheusConfig {
@@ -232,30 +252,42 @@ func createPrometheusConfig(serviceGroups []ServiceGroup) PrometheusConfig {
 }
 
 func updatePrometheusConfig(configFile string, serviceGroups []ServiceGroup) error {
-	config := createPrometheusConfig(serviceGroups)
-	contents, err := executeTemplate(config)
-	if err != nil {
-		return fmt.Errorf("failed to execute template: %w", err)
-	}
+	_, err := util.RetryOperation(
+		func() (bool, error) {
+			config := createPrometheusConfig(serviceGroups)
+			contents, err := executeTemplate(config)
+			if err != nil {
+				return false, fmt.Errorf("failed to execute template: %w", err)
+			}
 
-	// Add YAML validation
-	var testConfig map[string]interface{}
-	if err := yaml.Unmarshal([]byte(contents), &testConfig); err != nil {
-		logrus.WithError(err).WithField("config", contents).Error("Generated invalid YAML configuration")
-		return fmt.Errorf("generated invalid YAML: %w", err)
-	}
+			// Add YAML validation
+			var testConfig map[string]interface{}
+			if err := yaml.Unmarshal([]byte(contents), &testConfig); err != nil {
+				logrus.WithError(err).WithField("config", contents).Error("Generated invalid YAML configuration")
+				return false, fmt.Errorf("generated invalid YAML: %w", err)
+			}
 
-	// Log the generated configuration for debugging
-	logrus.WithFields(logrus.Fields{
-		"config_file": configFile,
-		"yaml":        contents,
-	}).Debug("Writing new configuration")
+			// Log the generated configuration for debugging
+			logrus.WithFields(logrus.Fields{
+				"config_file": configFile,
+				"yaml":        contents,
+			}).Debug("Writing new configuration")
 
-	if err := writeConfigFile(configFile, []byte(contents)); err != nil {
-		return fmt.Errorf("failed to write config: %w", err)
-	}
+			if err := writeConfigFile(configFile, []byte(contents)); err != nil {
+				return false, fmt.Errorf("failed to write config: %w", err)
+			}
 
-	return reloadPrometheus()
+			if err := reloadPrometheus(); err != nil {
+				return false, fmt.Errorf("failed to reload prometheus: %w", err)
+			}
+
+			return true, nil
+		},
+		util.ConfigRetry,
+		3,
+	)
+
+	return err
 }
 
 var (
