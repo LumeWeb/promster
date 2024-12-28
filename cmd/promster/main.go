@@ -557,6 +557,11 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	if err := updatePrometheusConfig(configFile, serviceGroups); err != nil {
 		return fmt.Errorf("failed to update initial prometheus config: %w", err)
 	}
+
+	// Perform initial stale group check
+	if err := checkStaleGroups(ctx, registry); err != nil {
+		logrus.WithError(err).Error("Failed to perform initial stale group check")
+	}
 	// Create error channels
 	errChan := make(chan error, 100)
 	defer close(errChan)
