@@ -17,6 +17,7 @@ import (
 	"errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v3"
+	"gopkg.in/yaml.v2"
 	etcdregistry "go.lumeweb.com/etcd-registry"
 )
 
@@ -237,7 +238,19 @@ func updatePrometheusConfig(configFile string, serviceGroups []ServiceGroup) err
 		return fmt.Errorf("failed to execute template: %w", err)
 	}
 
-	logrus.WithField("config_file", configFile).Debug("Writing new configuration")
+	// Add YAML validation
+	var testConfig map[string]interface{}
+	if err := yaml.Unmarshal([]byte(contents), &testConfig); err != nil {
+		logrus.WithError(err).WithField("config", contents).Error("Generated invalid YAML configuration")
+		return fmt.Errorf("generated invalid YAML: %w", err)
+	}
+
+	// Log the generated configuration for debugging
+	logrus.WithFields(logrus.Fields{
+		"config_file": configFile,
+		"yaml":        contents,
+	}).Debug("Writing new configuration")
+
 	if err := writeConfigFile(configFile, []byte(contents)); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
