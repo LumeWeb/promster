@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"os"
 	"os/signal"
 	"reflect"
@@ -304,10 +305,8 @@ func monitorTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry, er
 	ticker := time.NewTicker(monitoringInterval)
 	defer ticker.Stop()
 
-	var (
-		previousGroups []ServiceGroup
-		targetsMu      sync.RWMutex
-	)
+	var previousGroups []ServiceGroup
+	var targetsMu sync.RWMutex
 
 	for {
 		select {
@@ -320,8 +319,28 @@ func monitorTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry, er
 			}
 
 			targetsMu.Lock()
-			groupsChanged := !reflect.DeepEqual(serviceGroups, previousGroups)
-			targetsMu.Unlock()
+			// Sort the groups to ensure consistent comparison
+			sort.Slice(serviceGroups, func(i, j int) bool {
+				return serviceGroups[i].Name < serviceGroups[j].Name
+			})
+			if len(previousGroups) > 0 {
+				sort.Slice(previousGroups, func(i, j int) bool {
+					return previousGroups[i].Name < previousGroups[j].Name
+				})
+			}
+
+			// Deep compare the actual content
+			groupsChanged := len(serviceGroups) != len(previousGroups)
+			if !groupsChanged {
+				for i := range serviceGroups {
+					if serviceGroups[i].Name != previousGroups[i].Name ||
+						!reflect.DeepEqual(serviceGroups[i].Targets, previousGroups[i].Targets) ||
+						!reflect.DeepEqual(serviceGroups[i].Labels, previousGroups[i].Labels) {
+						groupsChanged = true
+						break
+					}
+				}
+			}
 
 			if groupsChanged {
 				logrus.WithFields(logrus.Fields{
@@ -333,11 +352,10 @@ func monitorTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry, er
 					errChan <- fmt.Errorf("failed to update prometheus config: %w", err)
 				} else {
 					logrus.Info("Successfully updated prometheus configuration")
-					targetsMu.Lock()
 					previousGroups = serviceGroups
-					targetsMu.Unlock()
 				}
 			}
+			targetsMu.Unlock()
 
 		case <-ctx.Done():
 			return ctx.Err()
