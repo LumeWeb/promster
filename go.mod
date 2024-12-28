@@ -6,7 +6,7 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/urfave/cli/v3 v3.0.0-beta1
-	go.lumeweb.com/etcd-registry v0.0.0-20241228190737-b9daa9c6bd1d
+	go.lumeweb.com/etcd-registry v0.0.0-20241228195242-4e75ba5effe6
 	gopkg.in/yaml.v2 v2.4.0
 )
 

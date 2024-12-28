@@ -3,9 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"go.lumeweb.com/etcd-registry/types"
+	"sort"
 	"io"
 	"net/http"
-	"sort"
 	"os"
 	"os/signal"
 	"reflect"
@@ -18,9 +19,9 @@ import (
 	"errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v3"
-	"gopkg.in/yaml.v2"
 	etcdregistry "go.lumeweb.com/etcd-registry"
 	"go.lumeweb.com/promster/pkg/util"
+	"gopkg.in/yaml.v2"
 )
 
 //go:embed prometheus.yml.tmpl
@@ -297,65 +298,155 @@ var (
 	tlsInsecure        string
 	configFile         string
 	monitoringInterval time.Duration
+
+	// Timer management
+	timerPool = sync.Pool{
+		New: func() interface{} {
+			return time.NewTimer(time.Hour) // Default duration, will be reset before use
+		},
+	}
 )
 
-func monitorTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry, errChan chan<- error) error {
-	ticker := time.NewTicker(monitoringInterval)
-	defer ticker.Stop()
+// safeTimer wraps a timer with safe cleanup
+type safeTimer struct {
+	*time.Timer
+	stopped bool
+	mu      sync.Mutex
+}
 
-	var previousGroups []ServiceGroup
-	var targetsMu sync.RWMutex
+func newSafeTimer(d time.Duration) *safeTimer {
+	t := timerPool.Get().(*time.Timer)
+	t.Reset(d)
+	return &safeTimer{Timer: t}
+}
+
+func (t *safeTimer) Stop() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.stopped {
+		t.stopped = true
+		stopped := t.Timer.Stop()
+		timerPool.Put(t.Timer)
+		return stopped
+	}
+	return false
+}
+
+func monitorTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry, errChan chan<- error) error {
+	for {
+		if err := watchWithRetry(ctx, registry, errChan); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			logrus.WithError(err).Error("Watch failed, retrying...")
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Second): // Backoff before retry
+				continue
+			}
+		}
+	}
+}
+
+func watchWithRetry(ctx context.Context, registry *etcdregistry.EtcdRegistry, errChan chan<- error) error {
+	// Get initial state
+	serviceGroups, err := getScrapeTargets(ctx, registry)
+	if err != nil {
+		return fmt.Errorf("failed to get initial state: %w", err)
+	}
+
+	// Apply initial configuration
+	if err := updatePrometheusConfig(configFile, serviceGroups); err != nil {
+		return fmt.Errorf("failed to apply initial config: %w", err)
+	}
+
+	// Start watching for changes with retry
+	watchChan, err := util.RetryOperation(
+		func() (<-chan types.WatchEvent, error) {
+			return registry.WatchServices(ctx)
+		},
+		util.EtcdRetry,
+		3,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to start watch after retries: %w", err)
+	}
+
+	// Use a safe timer for debouncing updates
+	var currentTimer *safeTimer
+	const debounceInterval = 5 * time.Second
+
+	// Ensure timer cleanup on function exit
+	defer func() {
+		if currentTimer != nil {
+			currentTimer.Stop()
+		}
+	}()
 
 	for {
 		select {
-		case <-ticker.C:
-			serviceGroups, err := getScrapeTargets(ctx, registry)
-			if err != nil {
-				logrus.WithError(err).Error("Failed to get scrape targets")
-				errChan <- fmt.Errorf("%w: failed to get scrape targets: %v", ErrMonitoring, err)
-				continue
+		case event, ok := <-watchChan:
+			if !ok {
+				return fmt.Errorf("watch channel closed")
 			}
 
-			targetsMu.Lock()
-			// Sort the groups to ensure consistent comparison
-			sort.Slice(serviceGroups, func(i, j int) bool {
-				return serviceGroups[i].Name < serviceGroups[j].Name
-			})
-			if len(previousGroups) > 0 {
-				sort.Slice(previousGroups, func(i, j int) bool {
-					return previousGroups[i].Name < previousGroups[j].Name
+			logrus.WithFields(logrus.Fields{
+				"type":  event.Type,
+				"group": event.GroupName,
+				"node":  event.Node,
+			}).Debug("Received watch event")
+
+			// Stop existing timer if any
+			if currentTimer != nil {
+				currentTimer.Stop()
+			}
+
+			// Create new timer for batched update
+			currentTimer = newSafeTimer(debounceInterval)
+
+			// Capture serviceGroups in closure
+			currentGroups := serviceGroups
+
+			go func() {
+				<-currentTimer.C
+
+				// Get fresh state after batched changes
+				newGroups, err := getScrapeTargets(ctx, registry)
+				if err != nil {
+					errChan <- fmt.Errorf("failed to get updated state: %w", err)
+					return
+				}
+
+				// Sort both slices for consistent comparison
+				sort.Slice(currentGroups, func(i, j int) bool {
+					return currentGroups[i].Name < currentGroups[j].Name ||
+						(currentGroups[i].Name == currentGroups[j].Name && currentGroups[i].NodeID < currentGroups[j].NodeID)
 				})
-			}
+				sort.Slice(newGroups, func(i, j int) bool {
+					return newGroups[i].Name < newGroups[j].Name ||
+						(newGroups[i].Name == newGroups[j].Name && newGroups[i].NodeID < newGroups[j].NodeID)
+				})
 
-			// Deep compare the actual content
-			groupsChanged := len(serviceGroups) != len(previousGroups)
-			if !groupsChanged {
-				for i := range serviceGroups {
-					if serviceGroups[i].Name != previousGroups[i].Name ||
-						!reflect.DeepEqual(serviceGroups[i].Targets, previousGroups[i].Targets) ||
-						!reflect.DeepEqual(serviceGroups[i].Labels, previousGroups[i].Labels) {
-						groupsChanged = true
-						break
+				// Compare sorted states to avoid unnecessary updates
+				if !reflect.DeepEqual(currentGroups, newGroups) {
+					// Update Prometheus config
+					if err := updatePrometheusConfig(configFile, newGroups); err != nil {
+						errChan <- fmt.Errorf("failed to update config: %w", err)
+						return
 					}
-				}
-			}
 
-			if groupsChanged {
-				logrus.WithFields(logrus.Fields{
-					"num_groups": len(serviceGroups),
-					"groups":     serviceGroups,
-				}).Info("Service groups changed, updating configuration")
-
-				if err := updatePrometheusConfig(configFile, serviceGroups); err != nil {
-					errChan <- fmt.Errorf("failed to update prometheus config: %w", err)
+					serviceGroups = newGroups // Update outer variable
+					logrus.WithField("batch_size", len(newGroups)).Info("Configuration updated after batched changes")
 				} else {
-					logrus.Info("Successfully updated prometheus configuration")
-					previousGroups = serviceGroups
+					logrus.Debug("Skipping update - no changes detected in batch")
 				}
-			}
-			targetsMu.Unlock()
+			}()
 
 		case <-ctx.Done():
+			if currentTimer != nil {
+				currentTimer.Stop()
+			}
 			return ctx.Err()
 		}
 	}
@@ -385,7 +476,6 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	etcdUsername := cmd.String("etcd-username")
 	etcdPassword := cmd.String("etcd-password")
 	etcdTimeout := cmd.Duration("etcd-timeout")
-	monitoringInterval = cmd.Duration("monitoring-interval")
 
 	logrus.Info("====Starting Promster====")
 	logrus.WithFields(logrus.Fields{
@@ -403,7 +493,7 @@ func run(ctx context.Context, cmd *cli.Command) error {
 				etcdUsername,
 				etcdPassword,
 				etcdTimeout*2, // Double the timeout
-				5, // Increase max retries
+				5,             // Increase max retries
 			)
 			if err != nil {
 				return false, fmt.Errorf("failed to initialize connection: %w", err)
@@ -588,12 +678,6 @@ func main() {
 				Value:   30 * time.Second,
 				Usage:   "ETCD timeout",
 				Sources: cli.EnvVars("PROMSTER_ETCD_TIMEOUT"),
-			},
-			&cli.DurationFlag{
-				Name:    "monitoring-interval",
-				Value:   5 * time.Second,
-				Usage:   "How often to check for service changes",
-				Sources: cli.EnvVars("PROMSTER_MONITORING_INTERVAL"),
 			},
 		},
 		Action: run,
