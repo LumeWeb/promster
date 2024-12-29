@@ -213,14 +213,24 @@ func getScrapeTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry) 
 					// Get or create service group
 					sg, exists := groupedNodes[groupKey]
 					if !exists {
-						// Merge group common labels with node labels
+						// Create a new label map for this specific group
 						labels := make(map[string]string)
+						
+						// First add common labels from the group
 						for k, v := range group.Spec.CommonLabels {
 							labels[k] = v
 						}
+						
+						// Then add this specific node's labels
 						for k, v := range node.Labels {
-							labels[k] = v
+							// Skip exporter_type from node labels
+							if k != "exporter_type" {
+								labels[k] = v
+							}
 						}
+						
+						// Ensure exporter_type matches this node's type
+						labels["exporter_type"] = node.ExporterType
 
 						// Include exporter type in the job name
 						jobName := fmt.Sprintf("%s-%s", serviceName, node.ExporterType)
