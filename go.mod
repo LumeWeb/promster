@@ -6,7 +6,7 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/urfave/cli/v3 v3.0.0-beta1
-	go.lumeweb.com/etcd-registry v0.0.0-20241228214114-1af0f7958593
+	go.lumeweb.com/etcd-registry v0.0.0-20241229075941-3b5b86b6bd93
 	gopkg.in/yaml.v2 v2.4.0
 )
 
@@ -24,6 +24,7 @@ require (
 	golang.org/x/net v0.33.0 // indirect
 	golang.org/x/sys v0.28.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
+	golang.org/x/time v0.8.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20241223144023-3abc09e42ca8 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20241223144023-3abc09e42ca8 // indirect
 	google.golang.org/grpc v1.69.2 // indirect
