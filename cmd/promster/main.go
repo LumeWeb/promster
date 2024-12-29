@@ -166,10 +166,16 @@ func getScrapeTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry) 
 				return nil, fmt.Errorf("failed to get service groups: %w", err)
 			}
 
-			var groups []ServiceGroup
+			// Map to hold nodes by job name
+			groupedNodes := make(map[string]*ServiceGroup)
 
 			// For each service, get its group and nodes
 			for _, serviceName := range services {
+				// Skip groups with path separators (subpaths)
+				if strings.Contains(serviceName, "/") {
+					continue
+				}
+
 				group, err := registry.GetServiceGroup(ctx, serviceName)
 				if err != nil {
 					logrus.WithError(err).Warnf("Failed to get service group %s", serviceName)
@@ -182,7 +188,7 @@ func getScrapeTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry) 
 					continue
 				}
 
-				// Create a ServiceGroup for each node
+				// Process nodes for this service
 				for _, node := range nodes {
 					// Use ingress_host from labels if available, fallback to node ID
 					hostname := node.ID
@@ -201,36 +207,48 @@ func getScrapeTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry) 
 						metricsPath = "/metrics"
 					}
 
-					// Merge group common labels with node labels
-					labels := make(map[string]string)
-					for k, v := range group.Spec.CommonLabels {
-						labels[k] = v
-					}
-					for k, v := range node.Labels {
-						labels[k] = v
-					}
-
-					sg := ServiceGroup{
-						Name:        serviceName,
-						Targets:     []string{address},
-						MetricsPath: metricsPath,
-						NodeID:      node.ID,
-						Labels:      labels,
-					}
-
-					// Use auth from group spec if both username and password are available
-					if group.Spec.Password != "" {
-						sg.BasicAuth = &BasicAuth{
-							Username: group.Spec.Username,
-							Password: group.Spec.Password,
+					// Get or create service group
+					sg, exists := groupedNodes[serviceName]
+					if !exists {
+						// Merge group common labels with node labels
+						labels := make(map[string]string)
+						for k, v := range group.Spec.CommonLabels {
+							labels[k] = v
 						}
+						for k, v := range node.Labels {
+							labels[k] = v
+						}
+
+						sg = &ServiceGroup{
+							Name:        serviceName,
+							Targets:     []string{},
+							MetricsPath: metricsPath,
+							Labels:      labels,
+						}
+
+						// Use auth from group spec if password is available
+						if group.Spec.Password != "" {
+							sg.BasicAuth = &BasicAuth{
+								Username: group.Spec.Username,
+								Password: group.Spec.Password,
+							}
+						}
+
+						groupedNodes[serviceName] = sg
 					}
 
-					groups = append(groups, sg)
+					// Add target to existing group
+					sg.Targets = append(sg.Targets, address)
 				}
 			}
 
-			return groups, nil
+			// Convert map to slice
+			result := make([]ServiceGroup, 0, len(groupedNodes))
+			for _, sg := range groupedNodes {
+				result = append(result, *sg)
+			}
+
+			return result, nil
 		},
 		util.EtcdRetry,
 		3,
