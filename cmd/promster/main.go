@@ -656,11 +656,10 @@ func isProductionEnvironment(labels map[string]string) bool {
 	return env == "production" || env == "prod"
 }
 
-
 func shouldCleanupEmptyGroup(group *types.ServiceGroup) bool {
 	// Check protection labels in CommonLabels
-	if group.Spec.CommonLabels["no-cleanup"] == "true" || 
-	   group.Spec.CommonLabels["retain-empty"] == "true" {
+	if group.Spec.CommonLabels["no-cleanup"] == "true" ||
+		group.Spec.CommonLabels["retain-empty"] == "true" {
 		return false
 	}
 
@@ -675,8 +674,8 @@ func shouldCleanupEmptyGroup(group *types.ServiceGroup) bool {
 
 func shouldCleanupStaleGroup(group *types.ServiceGroup, nodes []types.Node) bool {
 	// Check protection labels
-	if group.Spec.CommonLabels["no-cleanup"] == "true" || 
-	   group.Spec.CommonLabels["retain-stale"] == "true" {
+	if group.Spec.CommonLabels["no-cleanup"] == "true" ||
+		group.Spec.CommonLabels["retain-stale"] == "true" {
 		return false
 	}
 
@@ -698,6 +697,8 @@ func shouldCleanupStaleGroup(group *types.ServiceGroup, nodes []types.Node) bool
 }
 
 func checkStaleGroups(ctx context.Context, registry *etcdregistry.EtcdRegistry) error {
+	// Disable stale group check for now
+	return nil
 	services, err := registry.GetServiceGroups(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get service groups: %w", err)
