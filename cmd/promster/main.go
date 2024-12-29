@@ -166,7 +166,7 @@ func getScrapeTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry) 
 				return nil, fmt.Errorf("failed to get service groups: %w", err)
 			}
 
-			// Map to hold nodes by job name
+			// Map to hold nodes by job name and exporter type
 			groupedNodes := make(map[string]*ServiceGroup)
 
 			// For each service, get its group and nodes
@@ -190,6 +190,9 @@ func getScrapeTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry) 
 
 				// Process nodes for this service
 				for _, node := range nodes {
+					// Create a composite key using service name and exporter type
+					groupKey := fmt.Sprintf("%s_%s", serviceName, node.ExporterType)
+
 					// Use ingress_host from labels if available, fallback to node ID
 					hostname := node.ID
 					if ingressHost, ok := node.Labels["ingress_host"]; ok && ingressHost != "" {
@@ -208,7 +211,7 @@ func getScrapeTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry) 
 					}
 
 					// Get or create service group
-					sg, exists := groupedNodes[serviceName]
+					sg, exists := groupedNodes[groupKey]
 					if !exists {
 						// Merge group common labels with node labels
 						labels := make(map[string]string)
@@ -219,8 +222,11 @@ func getScrapeTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry) 
 							labels[k] = v
 						}
 
+						// Include exporter type in the job name
+						jobName := fmt.Sprintf("%s-%s", serviceName, node.ExporterType)
+
 						sg = &ServiceGroup{
-							Name:        serviceName,
+							Name:        jobName,
 							Targets:     []string{},
 							MetricsPath: metricsPath,
 							Labels:      labels,
@@ -234,7 +240,7 @@ func getScrapeTargets(ctx context.Context, registry *etcdregistry.EtcdRegistry) 
 							}
 						}
 
-						groupedNodes[serviceName] = sg
+						groupedNodes[groupKey] = sg
 					}
 
 					// Add target to existing group
